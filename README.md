@@ -10,7 +10,7 @@
 
 - **Session Capture** — Reads OpenClaw session transcripts, extracts meaningful user/assistant exchanges
 - **File Monitoring** — Tracks recently modified workspace files automatically
-- **Instant Freeze** — `Cmd+Shift+A` to capture "what am I working on right now"
+- **Instant Freeze** — One click to capture "what am I working on right now"
 - **Local Encryption** — AES-256-GCM, master password never leaves your Mac
 - **Cloud Sync (optional)** — Encrypts before uploading to your [huper.org](https://huper.org) account
 
@@ -19,103 +19,125 @@
 ## Installation
 
 ### Prerequisites
-
 - macOS
 - Python 3.10+
 - [OpenClaw](https://github.com/openclaw/openclaw)
 
-### Setup
-
+### Quick Start
 ```bash
-# 1. Clone the repo
-git clone https://github.com/ankechenlab-node/amber_hunter.git
-cd amber_hunter
+# Run the installer
+bash ~/.openclaw/skills/amber-hunter/install.sh
 
-# 2. Install dependencies
+# Then open https://huper.org/dashboard → "Encryption" tab to set your master password
+```
+
+### Manual Setup
+```bash
+# Install dependencies
 pip install -r requirements.txt
 
-# 3. Configure
-cat > ~/.amber-hunter/config.json << 'EOF'
-{
-  "api_key": "your-huper-org-api-key",
-  "master_password": "your-local-encryption-password"
-}
-EOF
+# Create config (get your API key from https://huper.org/dashboard)
+mkdir -p ~/.amber-hunter
+echo '{"api_key": "your-key", "huper_url": "https://huper.org/api"}' > ~/.amber-hunter/config.json
 
-# 4. Start the service
+# Start service
 python3 amber_hunter.py &
-
-# 5. (Optional) Enable auto-start with LaunchAgent
-cp com.huper.amber-hunter.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.huper.amber-hunter.plist
 ```
 
 ### Get Your API Key
-
 1. Go to [huper.org/dashboard](https://huper.org/dashboard)
 2. Login → API Key tab → Generate new key
-3. Copy the key into `config.json`
+3. Paste into `~/.amber-hunter/config.json` as `api_key`
 
 ---
 
 ## Usage
 
 ### Freeze via Browser
+Open [huper.org](https://huper.org), click "冻结当下" — amber-hunter pre-fills the modal with your current session context and related files.
 
-Open [huper.org](https://huper.org) and click "冻结当下" — amber-hunter pre-fills the modal with your current session context.
-
-### Freeze via API
-
+### Freeze via Terminal
 ```bash
-# Check status
+bash ~/.openclaw/skills/amber-hunter/freeze.sh
+```
+
+### Check Status
+```bash
 curl http://localhost:18998/status
-
-# Get session summary
-curl http://localhost:18998/session/summary
-
-# Get recent workspace files
-curl http://localhost:18998/session/files
-
-# Trigger freeze (returns pre-fill data)
-curl -X POST http://localhost:18998/freeze
-
-# List local capsules
-curl http://localhost:18998/capsules
-
-# Create a capsule
-curl -X POST http://localhost:18998/capsules \
-  -H "Content-Type: application/json" \
-  -d '{"memo":"Architecture review","content":"Discussed the module structure...","tags":"design,review"}'
 ```
 
 ---
 
 ## API Reference
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/status` | GET | Service status, session info |
-| `/session/summary` | GET | OpenClaw conversation summary |
-| `/session/files` | GET | Recently modified workspace files |
-| `/freeze` | POST | Trigger freeze, returns pre-fill data |
-| `/capsules` | GET | List local capsules |
-| `/capsules` | POST | Create a capsule |
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/status` | GET | None | Service status |
+| `/token` | GET | localhost | Get local API key |
+| `/session/summary` | GET | None | OpenClaw conversation summary |
+| `/session/files` | GET | None | Recent workspace files |
+| `/freeze` | GET/POST | Bearer or ?token= | Trigger freeze |
+| `/capsules` | GET | Bearer | List local capsules |
+| `/capsules` | POST | Bearer | Create capsule |
+| `/capsules/{id}` | GET | Bearer | Get capsule |
+| `/capsules/{id}` | DELETE | Bearer | Delete capsule |
+| `/sync` | GET | Bearer or ?token= | Sync to cloud |
+| `/master-password` | POST | localhost | Set master password |
+
+---
+
+## Authentication
+
+### Browser Integration (Recommended)
+Amber-hunter is designed to work with [huper.org](https://huper.org) via browser. The frontend at huper.org fetches from `localhost:18998` directly — no CORS issues since it's same-origin.
+
+For the freeze button, authentication uses a query parameter to bypass browser restrictions on cross-origin POST requests with custom headers:
+```bash
+curl "http://localhost:18998/freeze?token=YOUR_API_KEY"
+```
+
+### Direct API Calls
+```bash
+# With Bearer token
+curl http://localhost:18998/capsules \
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# With query parameter
+curl "http://localhost:18998/capsules?token=YOUR_API_KEY"
+```
 
 ---
 
 ## Security
 
-- **Master Password** stored in macOS Keychain, never transmitted
+- **Master Password** stored in macOS Keychain — never written to disk in plaintext
 - **Capsules** encrypted with AES-256-GCM before any network transmission
-- **API Key** only used for huper.org authentication, not for encryption
-- **Local-first**: works fully offline without cloud sync
+- **API Key** only used for huper.org authentication — not used for encryption
+- **Local-first** — works fully offline without cloud sync
+- **Zero knowledge** — cloud never sees your master password or unencrypted content
+
+---
+
+## File Structure
+
+```
+amber-hunter/
+├── amber_hunter.py      # FastAPI main service
+├── core/
+│   ├── crypto.py        # AES-256-GCM encryption
+│   ├── db.py            # SQLite local storage
+│   ├── keychain.py      # macOS Keychain wrapper
+│   ├── models.py        # Pydantic models
+│   └── session.py       # OpenClaw session parsing
+├── freeze.sh            # Terminal freeze trigger
+├── install.sh          # Installation script
+└── requirements.txt    # Python dependencies
+```
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE)
-
----
+MIT License
 
 *Built with 🔒 by [Anke Chen](https://github.com/ankechenlab-node) for the [Huper琥珀](https://huper.org) ecosystem.*
