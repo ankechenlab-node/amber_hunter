@@ -82,7 +82,12 @@ curl http://localhost:18998/status
 | `/capsules/{id}` | GET | Bearer | Get capsule |
 | `/capsules/{id}` | DELETE | Bearer | Delete capsule |
 | `/sync` | GET | Bearer or ?token= | Sync to cloud |
+| `/config` | GET/POST | Bearer or ?token= | Read/set auto_sync config |
 | `/master-password` | POST | localhost | Set master password |
+
+## Auto-Sync
+
+When auto-sync is enabled (via Dashboard → Encryption → Auto-sync toggle), every freeze automatically uploads to your huper.org cloud account. Toggle state is stored locally in SQLite — no cloud dependency.
 
 ---
 
