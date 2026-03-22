@@ -75,12 +75,29 @@ fi
 # ── 4. 开机自启 ───────────────────────────────────────
 echo "[4/5] 配置开机自启..."
 if $IS_MAC; then
-  PLIST="$HOME/Library/LaunchAgents/com.huper.amber-hunter.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
+  # amber-hunter 主服务
+  PLIST="$HOME/Library/LaunchAgents/com.huper.amber-hunter.plist"
   sed "s|/Users/leo|$HOME|g" "$HUNTER_DIR/com.huper.amber-hunter.plist" > "$PLIST"
   chmod 644 "$PLIST"
+  launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST" 2>/dev/null || true
-  echo "  ✅ LaunchAgent 已安装"
+  echo "  ✅ amber-hunter LaunchAgent 已安装"
+  # proactive 自动巡逻（每 10 分钟）
+  NODE_BIN=$(command -v node 2>/dev/null || echo "")
+  if [ -n "$NODE_BIN" ]; then
+    PROACTIVE_PLIST="$HOME/Library/LaunchAgents/com.huper.amber-proactive.plist"
+    sed -e "s|AMBER_NODE_PATH|$NODE_BIN|g" \
+        -e "s|AMBER_HUNTER_DIR|$HUNTER_DIR|g" \
+        -e "s|AMBER_HOME|$HOME|g" \
+        "$HUNTER_DIR/proactive/com.huper.amber-proactive.plist" > "$PROACTIVE_PLIST"
+    chmod 644 "$PROACTIVE_PLIST"
+    launchctl unload "$PROACTIVE_PLIST" 2>/dev/null || true
+    launchctl load "$PROACTIVE_PLIST" 2>/dev/null || true
+    echo "  ✅ amber-proactive LaunchAgent 已安装（每 10 分钟自动捕获记忆）"
+  else
+    echo "  ⚠️  未找到 node，跳过 proactive 安装（可后续运行: brew install node）"
+  fi"
 
 elif $IS_LINUX; then
   SERVICE_DIR="$HOME/.config/systemd/user"

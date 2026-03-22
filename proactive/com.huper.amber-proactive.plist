@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.huper.amber-proactive</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>AMBER_NODE_PATH</string>
+        <string>AMBER_HUNTER_DIR/proactive/scripts/proactive-check.js</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>StandardOutPath</key>
+    <string>AMBER_HOME/.amber-hunter/amber-proactive.log</string>
+    <key>StandardErrorPath</key>
+    <string>AMBER_HOME/.amber-hunter/amber-proactive.err.log</string>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>
