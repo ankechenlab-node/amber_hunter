@@ -96,7 +96,12 @@ def session_files(request: Request):
 
 @app.api_route("/freeze", methods=["GET", "POST", "OPTIONS"])
 def trigger_freeze(request: Request, authorization: str = Header(None)):
-    """触发 freeze：返回预填数据（需认证）"""
+    """触发 freeze：返回预填数据（需认证）
+    
+    认证方式（按优先级）：
+    1. Query param: ?token=xxx（解决浏览器混合内容限制）
+    2. Header: Authorization: Bearer xxx
+    """
     # 处理 CORS preflight
     if request.method == "OPTIONS":
         h = add_cors_headers(request)
@@ -104,7 +109,11 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
         h["access-control-allow-headers"] = "Authorization, Content-Type"
         return JSONResponse({}, headers=h)
 
-    verify_token(authorization)
+    # 优先从 query param 读取 token（兼容混合内容场景）
+    token = request.query_params.get("token")
+    if not token:
+        token = authorization
+    verify_token(token)
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
     files = get_recent_files(limit=5)
@@ -238,6 +247,18 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     conn.close()
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
+
+# ── 本地 Token（仅 localhost 可读）──────────────────────
+@app.get("/token")
+def get_local_token(request: Request):
+    """返回本地 API token（仅限本机请求，browser→amber-hunter 直连用）"""
+    client = request.client
+    if client and client.host not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    token = get_api_token()
+    if not token:
+        return JSONResponse({"api_key": None}, headers=add_cors_headers(request))
+    return JSONResponse({"api_key": token}, headers=add_cors_headers(request))
 
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
