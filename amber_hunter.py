@@ -11,7 +11,7 @@ v0.8.4 修复：
 - Session：正则加了 try/except 保护，失败不影响整体运行
 """
 
-import os, sys, json, time, secrets, sqlite3, hashlib, base64
+import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc
 from pathlib import Path
 
 # ── 核心模块 ────────────────────────────────────────────
@@ -20,7 +20,7 @@ from core.crypto import derive_key, encrypt_content, decrypt_content, generate_s
 from core.keychain import (
     get_master_password, set_master_password,
     get_api_token, get_huper_url,
-    ensure_config_dir, KEYCHAIN_SVC,
+    ensure_config_dir,
 )
 from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules, get_config, set_config
 from core.session import get_current_session_key, build_session_summary, get_recent_files
@@ -33,6 +33,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware as StarletteCORSMiddleware
 from starlette.responses import Response
+
+# ── 语义模型缓存（模块级，只加载一次）────────────────────
+_EMBED_MODEL = None
+
 from pydantic import BaseModel
 
 HOME = Path.home()
@@ -361,8 +365,11 @@ def recall_memories(
     search_mode = mode
     if mode == "auto" or mode == "semantic":
         try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("all-MiniLM-L6-v2")
+            global _EMBED_MODEL
+            if _EMBED_MODEL is None:
+                from sentence_transformers import SentenceTransformer
+                _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            model = _EMBED_MODEL
             q_vec = model.encode(q)
             cap_vecs = model.encode([c.get("_decrypted_content", "")[:512] for _, c in scored[:50]])
             # 简单余弦相似度
@@ -397,6 +404,9 @@ def recall_memories(
                 )
             search_mode = "keyword"
 
+    # 缩短解密明文在内存中的存活窗口
+    del parsed_capsules
+    gc.collect()
     return JSONResponse({
         "memories": memories[:limit],
         "query": q,

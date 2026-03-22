@@ -59,37 +59,53 @@ def _macos_set(account: str, password: str) -> bool:
 
 # ── Windows ─────────────────────────────────────────────
 def _windows_get(account: str) -> str | None:
+    """从 Windows 凭据管理器读取密码（需要 pywin32）。
+    未安装 pywin32 时返回 None；调用方（get_master_password）会 fallback 到 config.json。
+    安装方法：pip install pywin32
+    """
     try:
-        r = subprocess.run(
-            ["cmdkey", "/list"],
-            capture_output=True, text=True, timeout=5, shell=True
-        )
-        lines = r.stdout.splitlines()
+        import win32cred
         target = f"amber-hunter:{account}"
-        for line in lines:
-            if target.lower() in line.lower():
-                # Windows 凭据中没有直接获取密码的命令，需要手动注册表读取或用 Python winreg
-                # 这里用 powershell 读取
-                ps = subprocess.run(
-                    ["powershell", "-Command",
-                     f"((cmdkey /list:{target} 2>&1) -match 'Password:')"],
-                    capture_output=True, text=True, timeout=5
-                )
-                for l in ps.stdout.splitlines():
-                    if "Password:" in l:
-                        return l.split("Password:", 1)[1].strip()
-        return None
+        cred = win32cred.CredRead(target, win32cred.CRED_TYPE_GENERIC)
+        if cred and cred.get("CredentialBlob"):
+            blob = cred["CredentialBlob"]
+            # CredentialBlob 以 UTF-16-LE 编码字节串返回
+            return blob.decode("utf-16-le") if isinstance(blob, bytes) else str(blob)
+    except ImportError:
+        pass  # pywin32 未安装，由 get_master_password() 处理 fallback
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _windows_set(account: str, password: str) -> bool:
+    """将密码写入 Windows 凭据管理器（需要 pywin32）。
+    未安装 pywin32 时回落到 cmdkey（仅存储，无法读回）。
+    安装方法：pip install pywin32
+    """
+    target = f"amber-hunter:{account}"
+    # 优先使用 win32cred（可读回密码）
     try:
-        target = f"amber-hunter:{account}"
+        import win32cred
+        credential = {
+            "Type": win32cred.CRED_TYPE_GENERIC,
+            "TargetName": target,
+            "UserName": "amber",
+            "CredentialBlob": password,
+            "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
+        }
+        win32cred.CredWrite(credential, 0)
+        return True
+    except ImportError:
+        pass  # pywin32 未安装，fallback 到 cmdkey
+    except Exception:
+        return False
+    # Fallback: cmdkey（密码无法被程序读回，但至少记录凭据存在）
+    try:
         subprocess.run(["cmdkey", "/delete", target], capture_output=True)
         r = subprocess.run(
-            ["cmdkey", "/generic", target, "/user", "amber", "/pass", password],
-            capture_output=True, timeout=5, shell=True
+            ["cmdkey", "/generic:" + target, "/user:amber", "/pass:" + password],
+            capture_output=True, timeout=5
         )
         return r.returncode == 0
     except Exception:
@@ -145,9 +161,20 @@ def _credential_set(account: str, password: str) -> bool:
 def get_master_password() -> str | None:
     """
     获取 master_password。
-    必须从系统密钥链读取，读不到返回 None（不允许文件 fallback）。
+    macOS/Linux: 从系统密钥链读取。
+    Windows: cmdkey 无法读回密码，fallback 到 config.json（明文，用户知情）。
     """
-    return _credential_get("master_password")
+    pw = _credential_get("master_password")
+    if pw:
+        return pw
+    # Windows fallback: cmdkey 不支持通过命令行读回密码，从 config.json 读取
+    if OS == "windows" and CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            return cfg.get("master_password") or None
+        except Exception:
+            pass
+    return None
 
 
 def set_master_password(password: str) -> bool:
