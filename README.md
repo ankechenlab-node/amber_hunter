@@ -163,3 +163,64 @@ amber-hunter/
 MIT License
 
 *Built with 🔒 by [Anke Chen](https://github.com/ankechenlab-node) for the [Huper琥珀](https://huper.org) ecosystem.*
+
+---
+
+## Proactive Memory Capture
+
+amber-hunter includes **amber-proactive** — automatically captures significant moments from your AI collaboration sessions without you needing to remember to do it.
+
+### How It Works
+
+```
+AI collaboration session
+         ↓
+Proactive hook detects signals
+         ↓
+Automatically writes to amber (silently)
+         ↓
+Next similar context → AI proactively retrieves relevant memories
+```
+
+### Signals Detected
+
+| Signal | Examples | Type |
+|--------|---------|------|
+| User correction | "不对", "actually", "错了" | `correction` |
+| Error resolved | command failed → found solution | `error_fix` |
+| Key decision | confirmed architecture/approach | `decision` |
+| User preference | "I prefer...", "I usually..." | `preference` |
+| First success | first time achieving something | `discovery` |
+
+### Auto-Start (macOS)
+
+```bash
+cp ~/.openclaw/skills/amber-hunter/com.huper.amber-proactive.plist \
+   ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.huper.amber-proactive.plist
+```
+
+Runs every 10 minutes via LaunchAgent, silently.
+
+### Manual Trigger
+
+```bash
+node ~/.openclaw/skills/amber-hunter/proactive/scripts/proactive-check.js
+tail ~/.amber-hunter/amber-proactive.log
+```
+
+### File Structure
+
+```
+amber-hunter/
+├── amber_hunter.py           # Main FastAPI service
+├── core/                     # Core modules (crypto, db, keychain...)
+├── proactive/
+│   ├── README.md            # Proactive memory documentation
+│   ├── hooks/openclaw/      # OpenClaw hook definitions
+│   └── scripts/
+│       └── proactive-check.js  # Signal detection + amber write
+├── freeze.sh               # Terminal freeze trigger
+├── install.sh              # Cross-platform installer
+└── freeze.ps1             # Windows PowerShell version
+```
