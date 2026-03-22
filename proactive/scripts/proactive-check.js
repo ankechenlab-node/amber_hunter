@@ -18,6 +18,11 @@ const AMBER_PORT = 18998;
 const HOME = os.homedir();
 const CONFIG_PATH = path.join(HOME, '.amber-hunter', 'config.json');
 const SESSIONS_DIR = path.join(HOME, '.openclaw', 'agents', 'main', 'sessions');
+
+// Claude Cowork sessions (macOS)
+const CLAUDE_SESSIONS_BASE = process.platform === 'darwin'
+  ? path.join(HOME, 'Library', 'Application Support', 'Claude', 'local-agent-mode-sessions')
+  : null;
 const LOG_PATH = path.join(HOME, '.amber-hunter', 'amber-proactive.log');
 
 // ── Signal Patterns ──────────────────────────────────────────
@@ -59,17 +64,56 @@ function readConfig() {
   catch { return {}; }
 }
 
+// Recursively find the latest .jsonl (skip audit.jsonl and subagents/)
+function findLatestJsonl(dir, maxDepth) {
+  if (maxDepth === undefined) maxDepth = 8;
+  var best = null, bestMtime = 0;
+  function walk(d, depth) {
+    if (depth > maxDepth) return;
+    var entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch(e) { return; }
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== 'subagents') walk(full, depth + 1);
+      } else if (e.name.endsWith('.jsonl') && e.name !== 'audit.jsonl') {
+        try {
+          var mtime = fs.statSync(full).mtime.getTime();
+          if (mtime > bestMtime) { bestMtime = mtime; best = full; }
+        } catch(e2) {}
+      }
+    }
+  }
+  walk(dir, 0);
+  return best ? { file: best, mtime: bestMtime } : null;
+}
+
 function getLatestSession() {
+  // OpenClaw
+  var ocResult = null;
   try {
-    const files = fs.readdirSync(SESSIONS_DIR)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({
-        name: f,
-        mtime: fs.statSync(path.join(SESSIONS_DIR, f)).mtime.getTime()
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return files[0] ? path.join(SESSIONS_DIR, files[0].name) : null;
-  } catch { return null; }
+    var files = fs.readdirSync(SESSIONS_DIR)
+      .filter(function(f) { return f.endsWith('.jsonl'); })
+      .map(function(f) {
+        return { file: path.join(SESSIONS_DIR, f), mtime: fs.statSync(path.join(SESSIONS_DIR, f)).mtime.getTime() };
+      })
+      .sort(function(a, b) { return b.mtime - a.mtime; });
+    if (files[0]) ocResult = files[0];
+  } catch(e) {}
+
+  // Claude Cowork
+  var clResult = null;
+  if (CLAUDE_SESSIONS_BASE) {
+    try {
+      if (fs.existsSync(CLAUDE_SESSIONS_BASE)) clResult = findLatestJsonl(CLAUDE_SESSIONS_BASE);
+    } catch(e) {}
+  }
+
+  if (!ocResult && !clResult) return null;
+  if (!ocResult) return clResult.file;
+  if (!clResult) return ocResult.file;
+  return clResult.mtime > ocResult.mtime ? clResult.file : ocResult.file;
 }
 
 function extractTextFromContent(msg) {
@@ -105,6 +149,7 @@ function extractMessages(sessionPath) {
       try { d = JSON.parse(line); }
       catch { continue; }
 
+      // OpenClaw format: type === 'message'
       if (d.type === 'message') {
         const raw = d.message;
         if (!raw) continue;
@@ -116,6 +161,25 @@ function extractMessages(sessionPath) {
             try { const p = JSON.parse(raw); role = p.role || ''; } catch {}
           }
           messages.push({ role, text: text.trim() });
+        }
+      }
+      // Claude Cowork format: type === 'user' | 'assistant'
+      else if (d.type === 'user' || d.type === 'assistant') {
+        const msg = d.message;
+        let text = '';
+        if (msg && typeof msg === 'object') {
+          const content = msg.content;
+          if (typeof content === 'string') {
+            text = content;
+          } else if (Array.isArray(content)) {
+            text = content
+              .filter(p => p && p.type === 'text')
+              .map(p => p.text || '')
+              .join('\n');
+          }
+        }
+        if (text && text.trim().length > 5) {
+          messages.push({ role: d.type, text: text.trim().slice(0, 500) });
         }
       }
     }

@@ -137,7 +137,7 @@ def _linux_set(account: str, password: str) -> bool:
 
 
 # ── Cross-platform dispatcher ────────────────────────────
-def _credential_get(account: str) -> str | None:
+def _credential_get(account: str):
     if OS == "macos":
         return _macos_get(account)
     elif OS == "windows":

@@ -264,7 +264,7 @@ def recall_memories(
     authorization: str = Header(None),
 ):
     """
-    主动注入：搜索相关琥珀记忆，返回注入提示。
+        else:
     AI 在回复前调用此端点，用返回的记忆补充上下文。
 
     参数：
@@ -541,12 +541,24 @@ class MasterPasswordIn(BaseModel):
 
 @app.post("/master-password")
 def set_master_password_handler(password_in: MasterPasswordIn, request: Request):
-    """设置 master_password（存 macOS Keychain）"""
+    """设置 master_password（存 macOS Keychain + config.json 双备份）"""
     client = request.client
     if client and client.host not in ("127.0.0.1", "::1", "localhost"):
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    ok = set_master_password(password_in.password)
-    return JSONResponse({"ok": ok}, headers=add_cors_headers(request))
+    ok1 = set_master_password(password_in.password)
+    # 同时写到 config.json 作为 fallback（Keychain 访问可能受限）
+    try:
+        import json as _json
+        cfg = {}
+        if CONFIG_PATH.exists():
+            cfg = _json.loads(CONFIG_PATH.read_text())
+        cfg["master_password"] = password_in.password
+        CONFIG_PATH.parent.mkdir(exist_ok=True)
+        CONFIG_PATH.write_text(_json.dumps(cfg, indent=2))
+        ok2 = True
+    except Exception:
+        ok2 = False
+    return JSONResponse({"ok": ok1 or ok2, "keychain": ok1, "config": ok2}, headers=add_cors_headers(request))
 
 # ── 本地 Token（仅 localhost 可读）──────────────────────
 @app.get("/token")
