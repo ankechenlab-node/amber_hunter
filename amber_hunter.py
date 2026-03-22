@@ -22,7 +22,7 @@ from core.keychain import (
     get_api_token, get_huper_url,
     ensure_config_dir, KEYCHAIN_SVC,
 )
-from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced
+from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 
