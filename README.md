@@ -2,7 +2,7 @@
 
 > A local perception engine for [Huper琥珀](https://huper.org) — turns your AI collaboration sessions into frozen, searchable personal memories.
 
-**Amber-Hunter** runs on your Mac, constantly watching your OpenClaw agent sessions. When you're ready to freeze "this moment", it captures the conversation context, recent file changes, and stores everything in an encrypted local capsule — ready to be searched and woken anytime.
+**Amber-Hunter** runs on Mac, Windows, and Linux, constantly watching your OpenClaw agent sessions. When you're ready to freeze "this moment", it captures the conversation context, recent file changes, and stores everything in an encrypted local capsule — ready to be searched and woken anytime.
 
 ---
 
@@ -19,14 +19,16 @@
 ## Installation
 
 ### Prerequisites
-- macOS
+- macOS / Windows / Linux
 - Python 3.10+
 - [OpenClaw](https://github.com/openclaw/openclaw)
+- Internet connection (for cloud sync)
 
 ### Quick Start
 ```bash
-# Run the installer
+# Run the installer (works on all platforms)
 bash ~/.openclaw/skills/amber-hunter/install.sh
+```
 
 # Then open https://huper.org/dashboard → "Encryption" tab to set your master password
 ```
@@ -115,11 +117,26 @@ curl "http://localhost:18998/capsules?token=YOUR_API_KEY"
 
 ## Security
 
-- **Master Password** stored in macOS Keychain — never written to disk in plaintext
+- **Master Password** stored in OS-native credential store — never written to disk in plaintext
+  - macOS: Keychain (via `security` command)
+  - Linux: GNOME Keyring (via `secret-tool`)
+  - Windows: Credential Manager (via `cmdkey`)
 - **Capsules** encrypted with AES-256-GCM before any network transmission
 - **API Key** only used for huper.org authentication — not used for encryption
 - **Local-first** — works fully offline without cloud sync
 - **Zero knowledge** — cloud never sees your master password or unencrypted content
+
+---
+
+## Cross-Platform Support
+
+| OS | Credential Store | Auto-Start | Script |
+|----|----------------|-------------|--------|
+| macOS | Keychain (`security`) | LaunchAgent | `freeze.sh` (bash) |
+| Linux | GNOME Keyring (`secret-tool`) | systemd | `freeze.sh` (bash) |
+| Windows | Credential Manager (`cmdkey`) | Task Scheduler | `freeze.ps1` (PowerShell) |
+
+**Linux requirements:** `libsecret-tools` (`apt install libsecret-tools` on Debian/Ubuntu)
 
 ---
 
