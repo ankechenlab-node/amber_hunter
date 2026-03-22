@@ -77,9 +77,7 @@ function extractTextFromContent(msg) {
   // msg can be a dict or a string (Python dict repr)
   let parsed = msg;
   if (typeof msg === 'string') {
-    try { parsed = JSON.parse(msg); } catch {
-      try { parsed = eval('(' + msg + ')'); } catch { return ''; }
-    }
+    try { parsed = JSON.parse(msg); } catch { return ''; }
   }
   if (!parsed || typeof parsed !== 'object') return '';
 
