@@ -119,7 +119,12 @@ curl "http://localhost:18998/recall?q=python%20error&limit=3&token=YOUR_KEY"
 # Response includes injected_prompt for each relevant memory
 ```
 
-The AI receives pre-formatted memory blocks it can use directly in its reasoning.
+**Search modes:**
+- `keyword` (default if no vector library) — fast text matching on memo, tags, content
+- `semantic` — requires `sentence-transformers` + `numpy`, uses `all-MiniLM-L6-v2` embeddings
+- `auto` — uses semantic if available, falls back to keyword
+
+The AI receives pre-formatted memory blocks it can use directly in its reasoning. Response includes `mode` field showing which search mode was used.
 
 ---
 

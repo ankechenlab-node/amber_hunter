@@ -402,7 +402,18 @@ def recall_memories(
         "query": q,
         "mode": search_mode,
         "count": len(memories),
+        "semantic_available": _semantic_available(),
     }, headers=add_cors_headers(request))
+
+
+def _semantic_available() -> bool:
+    """检查是否安装了语义搜索依赖"""
+    try:
+        import sentence_transformers as _
+        import numpy as _
+        return True
+    except ImportError:
+        return False
 
 
 # ── 云端同步（需认证）────────────────────────────────
