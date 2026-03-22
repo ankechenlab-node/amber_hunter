@@ -85,11 +85,41 @@ curl http://localhost:18998/status
 | `/capsules/{id}` | DELETE | Bearer | Delete capsule |
 | `/sync` | GET | Bearer or ?token= | Sync to cloud |
 | `/config` | GET/POST | Bearer or ?token= | Read/set auto_sync config |
+| `/recall` | GET | Bearer or ?token= | Retrieve relevant memories, get injection prompts |
 | `/master-password` | POST | localhost | Set master password |
 
 ## Auto-Sync
 
 When auto-sync is enabled (via Dashboard → Encryption → Auto-sync toggle), every freeze automatically uploads to your huper.org cloud account. Toggle state is stored locally in SQLite — no cloud dependency.
+
+## Proactive Memory Capture
+
+amber-hunter automatically watches your AI collaboration sessions and writes significant moments to amber storage — silently, without you needing to remember to do it.
+
+### Signals Detected
+
+| Signal | Examples |
+|--------|---------|
+| User correction | "不对", "actually", "错了" |
+| Error resolved | command failed → found solution |
+| Key decision | architecture, tech stack confirmed |
+| User preference | "I prefer...", "I usually..." |
+| First success | first time achieving something |
+
+Runs every 10 minutes via LaunchAgent (macOS) or cron/systemd (Linux).
+
+## Active Recall (Proactive Injection)
+
+Before responding to a user message, the AI calls `/recall` to retrieve relevant amber memories and inject them into context — making every reply more informed by past decisions, preferences, and discoveries.
+
+```bash
+# Example recall query
+curl "http://localhost:18998/recall?q=python%20error&limit=3&token=YOUR_KEY"
+
+# Response includes injected_prompt for each relevant memory
+```
+
+The AI receives pre-formatted memory blocks it can use directly in its reasoning.
 
 ---
 

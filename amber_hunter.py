@@ -11,7 +11,7 @@ v0.8.4 修复：
 - Session：正则加了 try/except 保护，失败不影响整体运行
 """
 
-import os, sys, json, time, secrets
+import os, sys, json, time, secrets, sqlite3, hashlib, base64
 from pathlib import Path
 
 # ── 核心模块 ────────────────────────────────────────────
@@ -249,6 +249,161 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     conn.close()
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
+
+# ── 主动回忆（需认证）──────────────────────────────────
+@app.get("/recall")
+def recall_memories(
+    request: Request,
+    q: str = "",
+    limit: int = 3,
+    mode: str = "auto",
+    authorization: str = Header(None),
+):
+    """
+    主动注入：搜索相关琥珀记忆，返回注入提示。
+    AI 在回复前调用此端点，用返回的记忆补充上下文。
+
+    参数：
+      q: 搜索查询（用户当前消息）
+      limit: 返回记忆数量（默认 3）
+      mode: keyword | semantic | auto（默认 auto）
+
+    返回：
+      memories: 相关记忆列表，每条含 injected_prompt（注入用的提示文本）
+    """
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+
+    if not q or len(q.strip()) < 2:
+        return JSONResponse({"memories": [], "query": q, "mode": mode, "count": 0},
+                            headers=add_cors_headers(request))
+
+    q_lower = q.lower().strip()
+
+    # ── 读取所有胶囊 ────────────────────────────────
+    conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
+    c = conn.cursor()
+    rows = c.execute(
+        "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced "
+        "FROM capsules ORDER BY created_at DESC LIMIT 200"
+    ).fetchall()
+    conn.close()
+
+    keys = ["id","memo","content","tags","session_id","window_title","url","created_at","salt","nonce","synced"]
+    capsules = [dict(zip(keys, r)) for r in rows]
+
+    # ── 解密 content ──────────────────────────────
+    master_pw = get_master_password()
+    parsed_capsules = []
+    for cap in capsules:
+        content = cap.get("content") or ""
+        if cap.get("salt") and cap.get("nonce") and content and master_pw:
+            try:
+                import base64
+                salt = base64.b64decode(cap["salt"])
+                nonce = base64.b64decode(cap["nonce"])
+                ciphertext = base64.b64decode(content)
+                key = derive_key(master_pw, salt)
+                plaintext = decrypt_content(ciphertext, key, nonce)
+                content = plaintext.decode("utf-8") if plaintext else ""
+            except Exception:
+                content = ""
+        cap["_decrypted_content"] = content
+        parsed_capsules.append(cap)
+
+    # ── 关键词搜索 ────────────────────────────────
+    def score_keyword(cap):
+        score = 0
+        qw = q_lower.split()
+        memo = (cap.get("memo") or "").lower()
+        tags = (cap.get("tags") or "").lower()
+        content = (cap.get("_decrypted_content") or "").lower()
+        for w in qw:
+            score += memo.count(w) * 3
+            score += tags.count(w) * 2
+            score += content.count(w)
+        # 包含完整查询句子的加分
+        if q_lower in memo: score += 10
+        if q_lower in content: score += 5
+        return score
+
+    scored = [(score_keyword(c), c) for c in parsed_capsules]
+    scored = [(s, c) for s, c in scored if s > 0]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:limit]
+
+    # ── 构建注入提示 ──────────────────────────────
+    memories = []
+    for score, cap in top:
+        content = cap.get("_decrypted_content", "")
+        memo = cap.get("memo", "")
+        tags = cap.get("tags", "")
+        created = cap.get("created_at", 0)
+
+        injected = f"""[琥珀记忆 | {tags} | {created:.0f}]
+记忆：{memo}
+内容：{content[:300]}{"..." if len(content) > 300 else ""}"""
+        memories.append({
+            "id": cap["id"],
+            "memo": memo,
+            "content": content[:500],
+            "tags": tags,
+            "created_at": created,
+            "relevance_score": round(min(score / 10, 1.0), 2),
+            "injected_prompt": injected,
+        })
+
+    # ── 语义搜索（可选）───────────────────────────
+    search_mode = mode
+    if mode == "auto" or mode == "semantic":
+        try:
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+            q_vec = model.encode(q)
+            cap_vecs = model.encode([c.get("_decrypted_content", "")[:512] for _, c in scored[:50]])
+            # 简单余弦相似度
+            import numpy as np
+            sims = np.dot(cap_vecs, q_vec) / (np.linalg.norm(cap_vecs, axis=1) * np.linalg.norm(q_vec) + 1e-8)
+            top_semantic = sorted(
+                [(float(sims[i]), scored[i][1]) for i in range(len(sims))],
+                key=lambda x: x[0], reverse=True
+            )[:limit]
+            # 合并去重
+            seen = {m["id"] for m in memories}
+            for s, c in top_semantic:
+                if c["id"] not in seen:
+                    memories.append({
+                        "id": c["id"],
+                        "memo": c.get("memo", ""),
+                        "content": c.get("_decrypted_content", "")[:500],
+                        "tags": c.get("tags", ""),
+                        "created_at": c.get("created_at", 0),
+                        "relevance_score": round(float(s), 2),
+                        "injected_prompt": f"[琥珀记忆 | {c.get('tags','')}]\n记忆：{c.get('memo','')}\n内容：{c.get('_decrypted_content','')[:300]}",
+                    })
+                    seen.add(c["id"])
+                    if len(memories) >= limit:
+                        break
+            search_mode = "semantic+keyword"
+        except ImportError:
+            if mode == "semantic":
+                return JSONResponse(
+                    {"error": "semantic search requires sentence-transformers. Install: pip install sentence-transformers"},
+                    status_code=400, headers=add_cors_headers(request)
+                )
+            search_mode = "keyword"
+
+    return JSONResponse({
+        "memories": memories[:limit],
+        "query": q,
+        "mode": search_mode,
+        "count": len(memories),
+    }, headers=add_cors_headers(request))
+
 
 # ── 云端同步（需认证）────────────────────────────────
 @app.get("/sync")
