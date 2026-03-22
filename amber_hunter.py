@@ -31,6 +31,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.cors import CORSMiddleware as StarletteCORSMiddleware
+from starlette.responses import Response
 from pydantic import BaseModel
 
 HOME = Path.home()
@@ -40,8 +42,9 @@ ensure_config_dir()
 app = FastAPI(title="Amber Hunter", version="0.8.4")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
+# 使用 Starlette CORS middleware（更稳定）
 app.add_middleware(
-    CORSMiddleware,
+    StarletteCORSMiddleware,
     allow_origins=["https://huper.org", "http://localhost:18998", "http://127.0.0.1:18998"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
@@ -50,7 +53,7 @@ app.add_middleware(
 
 # ── 认证 ────────────────────────────────────────────────
 def verify_token(authorization: str = Header(None)) -> bool:
-    """验证本地 API token，防其他进程滥用"""
+    """验证本地 API token，防同一机器上其他进程滥用"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization[7:]
@@ -59,29 +62,48 @@ def verify_token(authorization: str = Header(None)) -> bool:
         raise HTTPException(status_code=401, detail="Invalid API token")
     return True
 
-def require_auth(authorization: str = Header(None)):
-    """FastAPI 依赖：验证本地 token"""
-    verify_token(authorization)
-    return True
+# ── 通用 CORS 响应头 ──────────────────────────────────
+ALLOWED_ORIGINS = [
+    "https://huper.org",
+    "http://localhost:18998",
+    "http://127.0.0.1:18998",
+]
+
+def add_cors_headers(request: Request):
+    """手动给 Response 添加 CORS 头"""
+    origin = request.headers.get("origin", "")
+    if origin in ALLOWED_ORIGINS:
+        return {"access-control-allow-origin": origin, "access-control-allow-credentials": "true"}
+    return {}
 
 # ── Session 读取（无认证，供前端读取）──────────────────
 @app.get("/session/summary")
-def session_summary():
-    """OpenClaw session 对话摘要（无需认证）"""
+def session_summary(request: Request):
+    headers = add_cors_headers(request)
     session_key = get_current_session_key()
     if not session_key:
-        return {"session_key": None, "summary": "未找到活跃 session", "messages": []}
-    return build_session_summary(session_key)
+        return JSONResponse({"session_key": None, "summary": "未找到活跃 session", "messages": []}, headers=headers)
+    return JSONResponse(build_session_summary(session_key), headers=headers)
 
 @app.get("/session/files")
-def session_files():
-    """Workspace 最近变更文件（无需认证）"""
+def session_files(request: Request):
+    headers = add_cors_headers(request)
     files = get_recent_files(limit=10)
-    return {"files": files, "workspace": str(HOME / ".openclaw" / "workspace")}
+    return JSONResponse({
+        "files": files,
+        "workspace": str(HOME / ".openclaw" / "workspace")
+    }, headers=headers)
 
-@app.post("/freeze")
-def trigger_freeze(authorization: str = Header(None)):
+@app.api_route("/freeze", methods=["GET", "POST", "OPTIONS"])
+def trigger_freeze(request: Request, authorization: str = Header(None)):
     """触发 freeze：返回预填数据（需认证）"""
+    # 处理 CORS preflight
+    if request.method == "OPTIONS":
+        h = add_cors_headers(request)
+        h["access-control-allow-methods"] = "GET, POST, OPTIONS"
+        h["access-control-allow-headers"] = "Authorization, Content-Type"
+        return JSONResponse({}, headers=h)
+
     verify_token(authorization)
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
@@ -90,22 +112,23 @@ def trigger_freeze(authorization: str = Header(None)):
     if files:
         file_names = "; ".join([f"{f['path']}" for f in files])
         prefill = f"{prefill}\n\n相关文件：{file_names}" if prefill else file_names
-    return {
+
+    h = add_cors_headers(request)
+    return JSONResponse({
         "session_key": session_key,
         "prefill": prefill[:500],
         "summary": session_data.get("summary", ""),
         "files": files[:5],
         "timestamp": time.time(),
-    }
+    }, headers=h)
 
 # ── 胶囊 CRUD（需认证）──────────────────────────────────
 @app.get("/capsules")
-def list_capsules_handler(authorization: str = Header(None)):
-    """列出本地胶囊（需认证）"""
+def list_capsules_handler(authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
     capsules = list_capsules(limit=50)
-    # 不暴露加密字段
-    return {
+    h = add_cors_headers(request) if request else {}
+    return JSONResponse({
         "capsules": [
             {
                 "id": c["id"],
@@ -119,15 +142,10 @@ def list_capsules_handler(authorization: str = Header(None)):
             }
             for c in capsules
         ]
-    }
+    }, headers=h)
 
 @app.post("/capsules")
-def create_capsule(capsule: CapsuleIn, authorization: str = Header(None)):
-    """
-    创建本地胶囊（加密存储）。
-    content 字段使用 AES-256-GCM 加密后存入 SQLite。
-    salt 和 nonce 随记录保存。
-    """
+def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
     master_pw = get_master_password()
     if not master_pw:
@@ -140,13 +158,12 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None)):
     now = time.time()
 
     if capsule.content:
-        # ── 加密 content ────────────────────────────────
+        # ── 加密 content ──────────────────────────────
         salt = generate_salt()
         key = derive_key(master_pw, salt)
         ciphertext, nonce = encrypt_content(capsule.content.encode("utf-8"), key)
-        import hashlib
+        import hashlib, base64
         content_hash = hashlib.sha256(ciphertext).hexdigest()
-        import base64
         salt_b64   = base64.b64encode(salt).decode()
         nonce_b64  = base64.b64encode(nonce).decode()
         ct_b64     = base64.b64encode(ciphertext).decode()
@@ -169,11 +186,11 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None)):
         content_hash=content_hash,
     )
 
-    return {"id": capsule_id, "created_at": now, "synced": False}
+    h = add_cors_headers(request) if request else {}
+    return JSONResponse({"id": capsule_id, "created_at": now, "synced": False}, headers=h)
 
 @app.get("/capsules/{capsule_id}")
-def get_capsule_handler(capsule_id: str, authorization: str = Header(None)):
-    """获取胶囊详情（含解密）"""
+def get_capsule_handler(capsule_id: str, authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
     record = get_capsule(capsule_id)
     if not record:
@@ -190,14 +207,12 @@ def get_capsule_handler(capsule_id: str, authorization: str = Header(None)):
             ciphertext = base64.b64decode(content)
             key = derive_key(master_pw, salt)
             plaintext = decrypt_content(ciphertext, key, nonce)
-            if plaintext:
-                content = plaintext.decode("utf-8")
-            else:
-                content = "[解密失败：密钥错误]"
+            content = plaintext.decode("utf-8") if plaintext else "[解密失败：密钥错误]"
         except Exception as e:
             content = f"[解密失败：{e}]"
 
-    return {
+    h = add_cors_headers(request) if request else {}
+    return JSONResponse({
         "id": record["id"],
         "memo": record["memo"],
         "content": content,
@@ -207,11 +222,10 @@ def get_capsule_handler(capsule_id: str, authorization: str = Header(None)):
         "url": record.get("url"),
         "created_at": record["created_at"],
         "synced": bool(record["synced"]),
-    }
+    }, headers=h)
 
 @app.delete("/capsules/{capsule_id}")
-def delete_capsule(capsule_id: str, authorization: str = Header(None)):
-    """删除胶囊（需认证）"""
+def delete_capsule(capsule_id: str, authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
     from core.db import get_capsule
     if not get_capsule(capsule_id):
@@ -222,16 +236,17 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None)):
     c.execute("DELETE FROM capsules WHERE id=?", (capsule_id,))
     conn.commit()
     conn.close()
-    return {"status": "ok"}
+    h = add_cors_headers(request) if request else {}
+    return JSONResponse({"status": "ok"}, headers=h)
 
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
-def get_status():
-    """服务状态"""
+def get_status(request: Request):
     session_key = get_current_session_key()
     master_pw = get_master_password()
     api_token = get_api_token()
-    return {
+    h = add_cors_headers(request)
+    return JSONResponse({
         "running": True,
         "version": "0.8.4",
         "session_key": session_key,
@@ -239,13 +254,14 @@ def get_status():
         "has_api_token": bool(api_token),
         "workspace": str(HOME / ".openclaw" / "workspace"),
         "huper_url": get_huper_url(),
-    }
+    }, headers=h)
 
 @app.get("/")
-def root():
-    return {"service": "amber-hunter", "version": "0.8.4", "docs": "/docs"}
+def root(request: Request):
+    h = add_cors_headers(request)
+    return JSONResponse({"service": "amber-hunter", "version": "0.8.4", "docs": "/docs"}, headers=h)
 
-# ── 启动 ────────────────────────────────────────────────
+# ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
     print("🌙 Amber-Hunter v0.8.4 启动")
