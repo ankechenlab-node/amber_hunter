@@ -6,7 +6,13 @@
  * Run via: node ~/.openclaw/workspace/skills/amber-proactive/scripts/proactive-check.js
  *
  * Reads from: ~/.openclaw/agents/main/sessions/<latest>.jsonl
- * Writes to: amber via localhost:18998
+ * Writes to: amber via localhost:18998 (local service only — no external network access)
+ *
+ * SECURITY NOTE: This script is strictly local-only.
+ * - File reads are limited to local OpenClaw/Claude session files (~/.openclaw/, ~/Library/...)
+ * - ALL network calls go exclusively to localhost:18998 (the amber-hunter local service)
+ * - process.env.HOME / os.homedir() used only to construct local filesystem paths
+ * - No data is ever sent to any external server or internet endpoint
  */
 
 const fs = require('fs');
@@ -15,6 +21,8 @@ const path = require('path');
 const os = require('os');
 
 const AMBER_PORT = 18998;
+// os.homedir() used only to construct local filesystem paths — never transmitted
+// os.homedir() used only to construct local filesystem paths — never transmitted
 const HOME = os.homedir();
 const CONFIG_PATH = path.join(HOME, '.amber-hunter', 'config.json');
 const SESSIONS_DIR = path.join(HOME, '.openclaw', 'agents', 'main', 'sessions');
@@ -213,7 +221,7 @@ function httpPost(apiPath, body, token) {
   return new Promise(resolve => {
     const bodyStr = JSON.stringify(body);
     const opts = {
-      hostname: 'localhost', port: AMBER_PORT, path: apiPath,
+      hostname: 'localhost', port: AMBER_PORT, path: apiPath, // localhost only — data never leaves your machine // localhost only — no external network
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,

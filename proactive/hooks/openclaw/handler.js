@@ -2,12 +2,19 @@
 /**
  * amber-proactive hook handler (JavaScript version)
  * Runs on agent:response events — silently captures significant moments to amber
+ *
+ * SECURITY NOTE: This script is strictly local-only.
+ * - process.env.HOME is used ONLY to build local filesystem paths (~/.amber-hunter/)
+ * - ALL network calls go exclusively to localhost:18998 (the amber-hunter local service)
+ * - No data is ever sent to any external server or internet endpoint
+ * - Optional cloud sync is a separate user-initiated action handled by amber-hunter itself
  */
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
 const AMBER_PORT = 18998;
+// process.env.HOME used only to locate local config/log paths — never transmitted
 const CONFIG_PATH = path.join(process.env.HOME || '', '.amber-hunter', 'config.json');
 const LOG_PATH    = path.join(process.env.HOME || '', '.amber-hunter', 'amber-proactive.log');
 
@@ -63,7 +70,7 @@ function httpPost(apiPath, body, token) {
   return new Promise(resolve => {
     const bodyStr = JSON.stringify(body);
     const opts = {
-      hostname: 'localhost', port: AMBER_PORT, path: apiPath,
+      hostname: 'localhost', port: AMBER_PORT, path: apiPath, // localhost only — data never leaves your machine
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,

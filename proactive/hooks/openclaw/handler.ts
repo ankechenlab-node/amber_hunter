@@ -18,6 +18,7 @@ import * as http from 'http';
 
 // ── Config ────────────────────────────────────────────────────
 const AMBER_PORT = 18998;
+// process.env.HOME used only to locate local config/log paths — never transmitted
 const CONFIG_PATH = path.join(process.env.HOME || '', '.amber-hunter', 'config.json');
 const LOG_PATH    = path.join(process.env.HOME || '', '.amber-hunter', 'amber-proactive.log');
 
@@ -71,7 +72,7 @@ function readConfig(): { api_key?: string; apiToken?: string } {
 async function httpPost(path: string, body: object, token: string): Promise<boolean> {
   return new Promise((resolve) => {
     const opts = {
-      hostname: 'localhost',
+      hostname: 'localhost', // localhost only — data never leaves your machine // localhost only — no external network
       port: AMBER_PORT,
       path,
       method: 'POST',
