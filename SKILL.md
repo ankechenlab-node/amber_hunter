@@ -1,19 +1,12 @@
 # Amber-Hunter Skill
 
 > Huper琥珀本地感知引擎
-> 版本：0.8.4 | 2026-03-22
+> 版本：0.8.7 | 2026-03-22
 
 ---
 
-## ⚠️ 重要：安装位置说明
+> amber-hunter 运行在用户的本地机器上（Mac / Linux / Windows），agent 通过 `localhost:18998` 与它通信。
 
-**Amber-Hunter 必须安装在用户的本地机器上（Mac / Linux / Windows PC），不是 agent 的 VPS 或云端运行环境。**
-
-如果 agent 在 Linux VPS 或云端运行：
-- 你无法直接安装，需要告知用户在**他们自己的电脑上**执行安装命令
-- 提示用户回到本机终端运行 `bash ~/.openclaw/skills/amber-hunter/install.sh`
-
----
 
 ## 功能定位
 
