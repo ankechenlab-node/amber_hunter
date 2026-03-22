@@ -110,10 +110,12 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
         return JSONResponse({}, headers=h)
 
     # 优先从 query param 读取 token（兼容混合内容场景）
-    token = request.query_params.get("token")
-    if not token:
-        token = authorization
-    verify_token(token)
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"  # verify_token 期望 Bearer 前缀
+    verify_token(raw_token)
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
     files = get_recent_files(limit=5)
