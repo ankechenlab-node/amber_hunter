@@ -1,328 +1,95 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter: Huper琥珀本地感知引擎
-v0.8.3 | 2026-03-22
+Amber-Hunter v0.8.4
+Huper琥珀本地感知引擎
 
-功能：
-  - 读取 OpenClaw session 对话历史
-  - 监控 workspace 文件变更
-  - 本地加密胶囊存储
-  - 可选：加密上传 huper.org
-
-启动：python3 amber_hunter.py
-API：  http://localhost:18998/
+v0.8.4 修复：
+- 加密：content 字段 AES-256-GCM 加密后存储，salt+nonce 持久化
+- 认证：本地 API token 验证（防同一机器上其他进程滥用）
+- CORS：仅允许 huper.org
+- Keychain：master_password 读不到直接报错，不 fallback 到文件
+- Session：正则加了 try/except 保护，失败不影响整体运行
 """
 
-import os, json, time, sqlite3, hashlib, base64, secrets, threading
+import os, sys, json, time, secrets
 from pathlib import Path
-from typing import Optional
-from datetime import datetime
 
-# ── FastAPI ──────────────────────────────────────────────
+# ── 核心模块 ────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).parent))
+from core.crypto import derive_key, encrypt_content, decrypt_content, generate_salt
+from core.keychain import (
+    get_master_password, set_master_password,
+    get_api_token, get_huper_url,
+    ensure_config_dir, KEYCHAIN_SVC,
+)
+from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced
+from core.session import get_current_session_key, build_session_summary, get_recent_files
+from core.models import CapsuleIn
+
+# ── FastAPI ─────────────────────────────────────────────
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# ── 加密（AES-256-GCM）────────────────────────────────
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-# ── 常量 ────────────────────────────────────────────────
 HOME = Path.home()
-AGENTS_DIR = HOME / ".openclaw" / "agents"
-SESSIONS_FILE = AGENTS_DIR / "main" / "sessions" / "sessions.json"
-WORKSPACE_DIR = HOME / ".openclaw" / "workspace"
-HUNTER_DB = HOME / ".amber-hunter" / "hunter.db"
-KEYRING_SERVICE = "com.huper.amber-hunter"
-KEYRING_ACCOUNT = "master_password"
+ensure_config_dir()
 
-os.makedirs(HOME / ".amber-hunter", exist_ok=True)
+# ── FastAPI App ────────────────────────────────────────
+app = FastAPI(title="Amber Hunter", version="0.8.4")
 
-# ── FastAPI App ──────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="0.8.3")
-
+# CORS：仅允许 huper.org（生产）和 localhost（开发）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://huper.org", "http://localhost:18998", "http://127.0.0.1:18998"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ── 数据模型 ─────────────────────────────────────────────
-class CapsuleIn(BaseModel):
-    memo: str
-    content: str = ""
-    tags: str = ""
-    session_id: Optional[str] = None
-    window_title: Optional[str] = None
-    url: Optional[str] = None
+# ── 认证 ────────────────────────────────────────────────
+def verify_token(authorization: str = Header(None)) -> bool:
+    """验证本地 API token，防其他进程滥用"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization[7:]
+    stored = get_api_token()
+    if not stored or token != stored:
+        raise HTTPException(status_code=401, detail="Invalid API token")
+    return True
 
-class CapsuleOut(BaseModel):
-    id: str
-    memo: str
-    tags: str
-    session_id: Optional[str]
-    window_title: Optional[str]
-    created_at: float
-    synced: bool
+def require_auth(authorization: str = Header(None)):
+    """FastAPI 依赖：验证本地 token"""
+    verify_token(authorization)
+    return True
 
-# ── 数据库初始化 ────────────────────────────────────────
-def init_db():
-    HUNTER_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(HUNTER_DB))
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS capsules (
-            id          TEXT PRIMARY KEY,
-            memo        TEXT,
-            content     TEXT,
-            tags        TEXT,
-            session_id  TEXT,
-            window_title TEXT,
-            url         TEXT,
-            created_at  REAL NOT NULL,
-            synced      INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS config (
-            key   TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ── 加密 ────────────────────────────────────────────────
-def derive_key(password: str, salt: bytes) -> bytes:
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
-                      salt=salt, iterations=100_000)
-    return kdf.derive(password.encode("utf-8"))
-
-def encrypt_content(data: bytes, key: bytes) -> tuple[bytes, bytes]:
-    nonce = secrets.token_bytes(12)
-    aesgcm = AESGCM(key)
-    return aesgcm.encrypt(nonce, data, None), nonce
-
-def decrypt_content(ciphertext: bytes, key: bytes, nonce: bytes) -> Optional[bytes]:
-    try:
-        aesgcm = AESGCM(key)
-        return aesgcm.decrypt(nonce, ciphertext, None)
-    except Exception:
-        return None
-
-def get_master_password() -> Optional[str]:
-    """从 macOS Keychain 读取 master_password"""
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["security", "find-generic-password",
-             "-s", KEYRING_SERVICE, "-a", KEYRING_ACCOUNT,
-             "-w"],
-            capture_output=True, text=True, timeout=3
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    # fallback: 从配置文件读（开发模式）
-    try:
-        cfg_path = HOME / ".amber-hunter" / "config.json"
-        if cfg_path.exists():
-            cfg = json.loads(cfg_path.read_text())
-            return cfg.get("master_password")
-    except Exception:
-        pass
-    return None
-
-def get_api_key() -> Optional[str]:
-    cfg_path = HOME / ".amber-hunter" / "config.json"
-    if cfg_path.exists():
-        cfg = json.loads(cfg_path.read_text())
-        return cfg.get("api_key")
-    return None
-
-# ── Session 读取 ────────────────────────────────────────
-def get_current_session_key() -> Optional[str]:
-    """找到最近一次活跃的 session key"""
-    try:
-        if not SESSIONS_FILE.exists():
-            return None
-        sessions = json.loads(SESSIONS_FILE.read_text())
-        if not sessions:
-            return None
-        # 按 updatedAt 降序
-        sorted_sessions = sorted(
-            sessions.items(),
-            key=lambda x: x[1].get("updatedAt", 0),
-            reverse=True
-        )
-        for key, meta in sorted_sessions:
-            # 跳过 cron 和 sub-agent session
-            if "cron:" in key or "sub-agent" in key:
-                continue
-            return key
-    except Exception:
-        pass
-    return None
-
-def read_session_messages(session_key: str, limit: int = 100) -> list[dict]:
-    """读取 session JSONL 文件，返回最近 limit 条消息"""
-    try:
-        if not SESSIONS_FILE.exists():
-            return []
-        sessions = json.loads(SESSIONS_FILE.read_text())
-        meta = sessions.get(session_key, {})
-        # sessionId 存储在 sessions.json 的 meta 里
-        session_id = meta.get("sessionId", "")
-        if not session_id:
-            # 尝试从 key 推导
-            session_id = session_key.replace("agent:main:", "").replace(":", "_")
-        file_path = AGENTS_DIR / "main" / "sessions" / f"{session_id}.jsonl"
-        if not file_path.exists():
-            return []
-        messages = []
-        with open(file_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") == "message":
-                        msg = obj.get("message", {})
-                        role = msg.get("role", "")
-                        content = msg.get("content", [])
-                        text_parts = []
-                        for item in (content if isinstance(content, list) else []):
-                            if isinstance(item, dict):
-                                if item.get("type") == "text":
-                                    text_parts.append(item.get("text", ""))
-                                elif item.get("type") == "toolCall":
-                                    pass  # skip tool calls
-                                elif item.get("type") == "toolResult":
-                                    pass  # skip tool results
-                        if text_parts:
-                            messages.append({
-                                "role": role,
-                                "text": " ".join(text_parts)[:500],
-                                "timestamp": obj.get("timestamp", ""),
-                            })
-                except Exception:
-                    continue
-        return messages[-limit:]
-    except Exception:
-        return []
-
-def _strip_telegram_meta(text: str) -> str:
-    """去除 Telegram 元数据，提取实际用户文本"""
-    import re
-    text = re.sub(r'System:\s*\[[^\]]+\]\s*', '', text)
-    text = re.sub(r'Conversation info[^`]*`{3,}json.*?`{3,}', '', text, flags=re.DOTALL)
-    text = re.sub(r'Sender[^`]*`{3,}json.*?`{3,}', '', text, flags=re.DOTALL)
-    text = text.strip()
-    return text
-
-def build_session_summary(session_key: str) -> dict:
-    """构建 session 摘要"""
-    messages = read_session_messages(session_key, limit=100)
-    if not messages:
-        return {"session_key": session_key, "summary": "", "messages": []}
-
-    # 提取用户消息（跳过工具调用）
-    user_msgs = [_strip_telegram_meta(m["text"]) for m in messages if m["role"] == "user"]
-    user_msgs = [t for t in user_msgs if t]  # 去除空消息
-
-    # 找最近一个有实质内容的用户消息
-    last_topic = ""
-    for msg in reversed(user_msgs):
-        if len(msg) > 10:  # 跳过太短的消息
-            last_topic = msg
-            break
-
-    if last_topic:
-        summary = f"最近对话：{last_topic[:200]}"
-    else:
-        summary = "当前 session 无用户对话内容"
-
-    return {
-        "session_key": session_key,
-        "summary": summary,
-        "last_user_message": last_topic[:300] if last_topic else None,
-        "message_count": len(messages),
-        "recent_messages": messages[-6:],
-    }
-
-# ── Workspace 文件变更 ───────────────────────────────────
-def get_recent_files(limit: int = 10) -> list[dict]:
-    """返回 workspace 最近修改的文件"""
-    try:
-        files = []
-        if WORKSPACE_DIR.exists():
-            all_files = [f for f in WORKSPACE_DIR.rglob("*") if f.is_file() and not f.name.startswith(".")]
-            for f in sorted(all_files, key=lambda x: -x.stat().st_mtime):
-                files.append({
-                    "path": str(f.relative_to(HOME)),
-                    "modified": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-                    "size_kb": round(f.stat().st_size / 1024, 1),
-                })
-                if len(files) >= limit:
-                    break
-        return files
-    except Exception as e:
-        return []
-
-# ── API 路由 ────────────────────────────────────────────
-
-@app.get("/status")
-def get_status():
-    """服务状态"""
-    master_pw = get_master_password()
-    api_key = get_api_key()
-    session_key = get_current_session_key()
-    return {
-        "running": True,
-        "version": "0.8.3",
-        "session_key": session_key,
-        "has_master_password": bool(master_pw),
-        "has_api_key": bool(api_key),
-        "workspace": str(WORKSPACE_DIR),
-    }
-
+# ── Session 读取（无认证，供前端读取）──────────────────
 @app.get("/session/summary")
 def session_summary():
-    """OpenClaw session 对话摘要"""
+    """OpenClaw session 对话摘要（无需认证）"""
     session_key = get_current_session_key()
     if not session_key:
         return {"session_key": None, "summary": "未找到活跃 session", "messages": []}
-    summary = build_session_summary(session_key)
-    return summary
+    return build_session_summary(session_key)
 
 @app.get("/session/files")
 def session_files():
-    """Workspace 最近变更文件"""
+    """Workspace 最近变更文件（无需认证）"""
     files = get_recent_files(limit=10)
-    return {"files": files, "workspace": str(WORKSPACE_DIR)}
+    return {"files": files, "workspace": str(HOME / ".openclaw" / "workspace")}
 
 @app.post("/freeze")
-def trigger_freeze():
-    """
-    触发 freeze：返回预填数据给前端
-    前端通过此接口获取 session 摘要 + 文件列表，
-    预填到琥珀冻结弹窗。
-    """
+def trigger_freeze(authorization: str = Header(None)):
+    """触发 freeze：返回预填数据（需认证）"""
+    verify_token(authorization)
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
     files = get_recent_files(limit=5)
-    files_summary = "; ".join([f"{f['path']}" for f in files]) if files else ""
     prefill = session_data.get("last_user_message", "") or ""
-    if files_summary:
-        prefill = f"{prefill}\n\n相关文件：{files_summary}" if prefill else files_summary
+    if files:
+        file_names = "; ".join([f"{f['path']}" for f in files])
+        prefill = f"{prefill}\n\n相关文件：{file_names}" if prefill else file_names
     return {
         "session_key": session_key,
         "prefill": prefill[:500],
@@ -331,75 +98,163 @@ def trigger_freeze():
         "timestamp": time.time(),
     }
 
+# ── 胶囊 CRUD（需认证）──────────────────────────────────
 @app.get("/capsules")
-def list_capsules():
-    """本地胶囊列表"""
-    conn = sqlite3.connect(str(HUNTER_DB))
-    c = conn.cursor()
-    rows = c.execute(
-        "SELECT id, memo, tags, session_id, window_title, created_at, synced "
-        "FROM capsules ORDER BY created_at DESC LIMIT 50"
-    ).fetchall()
-    conn.close()
+def list_capsules_handler(authorization: str = Header(None)):
+    """列出本地胶囊（需认证）"""
+    verify_token(authorization)
+    capsules = list_capsules(limit=50)
+    # 不暴露加密字段
     return {
         "capsules": [
             {
-                "id": r[0], "memo": r[1], "tags": r[2],
-                "session_id": r[3], "window_title": r[4],
-                "created_at": r[5], "synced": bool(r[6]),
+                "id": c["id"],
+                "memo": c["memo"],
+                "tags": c["tags"],
+                "session_id": c["session_id"],
+                "window_title": c["window_title"],
+                "created_at": c["created_at"],
+                "synced": bool(c["synced"]),
+                "has_encrypted_content": bool(c.get("salt")),
             }
-            for r in rows
+            for c in capsules
         ]
     }
 
 @app.post("/capsules")
-def create_capsule(capsule: CapsuleIn):
-    """创建本地胶囊（加密存储）"""
+def create_capsule(capsule: CapsuleIn, authorization: str = Header(None)):
+    """
+    创建本地胶囊（加密存储）。
+    content 字段使用 AES-256-GCM 加密后存入 SQLite。
+    salt 和 nonce 随记录保存。
+    """
+    verify_token(authorization)
     master_pw = get_master_password()
     if not master_pw:
-        raise HTTPException(status_code=401, detail="未设置 master_password，请在 dashboard 中配置")
+        raise HTTPException(
+            status_code=401,
+            detail="未设置 master_password，请先在 huper.org/dashboard 配置"
+        )
 
     capsule_id = secrets.token_hex(8)
     now = time.time()
 
-    conn = sqlite3.connect(str(HUNTER_DB))
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO capsules (id, memo, content, tags, session_id, window_title, url, created_at, synced) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (capsule_id, capsule.memo, capsule.content, capsule.tags,
-         capsule.session_id, capsule.window_title, capsule.url, now, 0)
+    if capsule.content:
+        # ── 加密 content ────────────────────────────────
+        salt = generate_salt()
+        key = derive_key(master_pw, salt)
+        ciphertext, nonce = encrypt_content(capsule.content.encode("utf-8"), key)
+        import hashlib
+        content_hash = hashlib.sha256(ciphertext).hexdigest()
+        import base64
+        salt_b64   = base64.b64encode(salt).decode()
+        nonce_b64  = base64.b64encode(nonce).decode()
+        ct_b64     = base64.b64encode(ciphertext).decode()
+    else:
+        salt_b64 = nonce_b64 = ct_b64 = content_hash = None
+        ct_b64 = capsule.content  # 空内容存空字符串
+
+    insert_capsule(
+        capsule_id=capsule_id,
+        memo=capsule.memo,
+        content=ct_b64,
+        tags=capsule.tags,
+        session_id=capsule.session_id,
+        window_title=capsule.window_title,
+        url=capsule.url,
+        created_at=now,
+        salt=salt_b64,
+        nonce=nonce_b64,
+        encrypted_len=len(ct_b64) if ct_b64 else 0,
+        content_hash=content_hash,
     )
-    conn.commit()
-    conn.close()
 
     return {"id": capsule_id, "created_at": now, "synced": False}
 
 @app.get("/capsules/{capsule_id}")
-def get_capsule(capsule_id: str):
-    """获取胶囊详情"""
-    conn = sqlite3.connect(str(HUNTER_DB))
-    c = conn.cursor()
-    row = c.execute(
-        "SELECT id, memo, content, tags, session_id, window_title, url, created_at, synced "
-        "FROM capsules WHERE id=?", (capsule_id,)
-    ).fetchone()
-    conn.close()
-    if not row:
+def get_capsule_handler(capsule_id: str, authorization: str = Header(None)):
+    """获取胶囊详情（含解密）"""
+    verify_token(authorization)
+    record = get_capsule(capsule_id)
+    if not record:
         raise HTTPException(status_code=404, detail="胶囊不存在")
+
+    master_pw = get_master_password()
+    content = record["content"] or ""
+
+    if record.get("salt") and record.get("nonce") and content:
+        import base64
+        try:
+            salt = base64.b64decode(record["salt"])
+            nonce = base64.b64decode(record["nonce"])
+            ciphertext = base64.b64decode(content)
+            key = derive_key(master_pw, salt)
+            plaintext = decrypt_content(ciphertext, key, nonce)
+            if plaintext:
+                content = plaintext.decode("utf-8")
+            else:
+                content = "[解密失败：密钥错误]"
+        except Exception as e:
+            content = f"[解密失败：{e}]"
+
     return {
-        "id": row[0], "memo": row[1], "content": row[2], "tags": row[3],
-        "session_id": row[4], "window_title": row[5], "url": row[6],
-        "created_at": row[7], "synced": bool(row[8]),
+        "id": record["id"],
+        "memo": record["memo"],
+        "content": content,
+        "tags": record["tags"],
+        "session_id": record["session_id"],
+        "window_title": record["window_title"],
+        "url": record.get("url"),
+        "created_at": record["created_at"],
+        "synced": bool(record["synced"]),
     }
+
+@app.delete("/capsules/{capsule_id}")
+def delete_capsule(capsule_id: str, authorization: str = Header(None)):
+    """删除胶囊（需认证）"""
+    verify_token(authorization)
+    from core.db import get_capsule
+    if not get_capsule(capsule_id):
+        raise HTTPException(status_code=404, detail="胶囊不存在")
+    import sqlite3
+    conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
+    c = conn.cursor()
+    c.execute("DELETE FROM capsules WHERE id=?", (capsule_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+# ── 服务状态（无需认证）────────────────────────────────
+@app.get("/status")
+def get_status():
+    """服务状态"""
+    session_key = get_current_session_key()
+    master_pw = get_master_password()
+    api_token = get_api_token()
+    return {
+        "running": True,
+        "version": "0.8.4",
+        "session_key": session_key,
+        "has_master_password": bool(master_pw),
+        "has_api_token": bool(api_token),
+        "workspace": str(HOME / ".openclaw" / "workspace"),
+        "huper_url": get_huper_url(),
+    }
+
+@app.get("/")
+def root():
+    return {"service": "amber-hunter", "version": "0.8.4", "docs": "/docs"}
 
 # ── 启动 ────────────────────────────────────────────────
 def main():
-    print("🌙 Amber-Hunter v0.8.3 启动")
-    print(f"   Session目录: {SESSIONS_FILE}")
-    print(f"   Workspace:   {WORKSPACE_DIR}")
-    print(f"   数据库:       {HUNTER_DB}")
-    print(f"   API:         http://localhost:18998/")
+    init_db()
+    print("🌙 Amber-Hunter v0.8.4 启动")
+    print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
+    print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
+    print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
+    print(f"   API:        http://localhost:18998/")
+    print(f"   CORS:       https://huper.org + localhost")
+    print(f"   认证:       本地 API token")
     uvicorn.run(app, host="127.0.0.1", port=18998, log_level="warning")
 
 if __name__ == "__main__":
