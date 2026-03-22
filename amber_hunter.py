@@ -22,7 +22,7 @@ from core.keychain import (
     get_api_token, get_huper_url,
     ensure_config_dir, KEYCHAIN_SVC,
 )
-from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules
+from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules, get_config, set_config
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 
@@ -251,7 +251,7 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     return JSONResponse({"status": "ok"}, headers=h)
 
 # ── 云端同步（需认证）────────────────────────────────
-@app.post("/sync")
+@app.get("/sync")
 def sync_to_cloud(request: Request, authorization: str = Header(None)):
     """
     将本地未同步的胶囊加密上传到 huper 云端。
@@ -326,6 +326,37 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
         "total": len(unsynced),
         "errors": errors if errors else None,
     }, headers=h)
+
+# ── 配置读取（Dashboard 用）────────────────────────────
+class ConfigIn(BaseModel):
+    auto_sync: bool | None = None
+
+@app.get("/config")
+def get_config_handler(request: Request, authorization: str = Header(None)):
+    """获取配置（auto_sync 等）"""
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+    auto_sync = get_config("auto_sync")
+    return JSONResponse({
+        "auto_sync": auto_sync == "true",
+    }, headers=add_cors_headers(request))
+
+@app.post("/config")
+def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = Header(None)):
+    """更新配置"""
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+    if cfg_in.auto_sync is not None:
+        set_config("auto_sync", "true" if cfg_in.auto_sync else "false")
+    return JSONResponse({"ok": True}, headers=add_cors_headers(request))
 
 # ── master_password 设置（Dashboard 用）────────────────
 from pydantic import BaseModel
