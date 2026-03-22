@@ -37,6 +37,32 @@ from starlette.responses import Response
 # ── 语义模型缓存（模块级，只加载一次）────────────────────
 _EMBED_MODEL = None
 
+# ── 本地轻量标签生成（无需网络/ML，关键词匹配）────────────────────────
+def _auto_tag_local(text: str, existing_tags: str = "") -> str:
+    """本地关键词自动打标签，zero-dependency。
+    在 create_capsule 时调用，tags 上传前本地完成，服务端无需处理内容。
+    """
+    if not text:
+        return existing_tags or ""
+    SIGNALS = {
+        "correction": ["actually", "not quite", "incorrect", "wrong", "not right",
+                       "不对", "错了", "不是", "应该是"],
+        "decision":   ["decided", "we'll go with", "final answer", "going with",
+                       "决定", "确定", "选择", "方案定了"],
+        "preference": ["i prefer", "i like", "i don't like", "i want", "i need",
+                       "喜欢", "不喜欢", "想要", "偏好"],
+        "discovery":  ["found out", "turns out", "realized", "interesting", "discovered",
+                       "发现", "原来", "有意思", "竟然"],
+        "error_fix":  ["bug", "fixed", "issue", "resolved", "error", "broken",
+                       "修复", "解决", "报错", "问题"],
+    }
+    tl = text.lower()
+    detected = [tag for tag, kws in SIGNALS.items() if any(kw in tl for kw in kws)]
+    existing = [t.strip() for t in existing_tags.split(",") if t.strip()] if existing_tags else []
+    merged = list(dict.fromkeys(existing + detected))
+    return ",".join(merged) if merged else (existing_tags or "")
+
+
 from pydantic import BaseModel
 
 HOME = Path.home()
@@ -217,11 +243,14 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), reques
         salt_b64 = nonce_b64 = ct_b64 = content_hash = None
         ct_b64 = capsule.content  # 空内容存空字符串
 
+    # 本地自动打标签（E2E 架构：标签在本地生成，加密后上传，服务端不处理内容）
+    final_tags = _auto_tag_local(capsule.content or "", capsule.tags or "")
+
     insert_capsule(
         capsule_id=capsule_id,
         memo=capsule.memo,
         content=ct_b64,
-        tags=capsule.tags,
+        tags=final_tags,
         session_id=capsule.session_id,
         window_title=capsule.window_title,
         url=capsule.url,
@@ -461,8 +490,10 @@ def _semantic_available() -> bool:
 @app.get("/sync")
 def sync_to_cloud(request: Request, authorization: str = Header(None)):
     """
-    将本地未同步的胶囊加密上传到 huper 云端。
-    流程：读取未同步胶囊 → 解密 content → POST 到云端 → 标记已同步
+    E2E 加密同步到 huper 云端。
+    - memo + tags 圤本地加密后上传，服务端仅存密文
+    - content 已圤本地加密，直接传输密文，无需解密
+    - 服务端永远看不到任何明文内容
     """
     raw_token = request.query_params.get("token")
     if not raw_token:
@@ -477,8 +508,7 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
     if not master_pw:
         return JSONResponse(
             {"error": "master_password not set", "detail": "请在 dashboard 设置 master_password"},
-            status_code=400,
-            headers=add_cors_headers(request)
+            status_code=400, headers=add_cors_headers(request)
         )
 
     import httpx
@@ -488,49 +518,68 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
 
     synced_count = 0
     errors = []
+
     for capsule in unsynced:
         try:
-            # ── 解密 content ──────────────────────────
-            content = capsule.get("content") or ""
-            if capsule.get("salt") and capsule.get("nonce") and content:
-                import base64
-                try:
-                    salt = base64.b64decode(capsule["salt"])
-                    nonce = base64.b64decode(capsule["nonce"])
-                    ciphertext = base64.b64decode(content)
-                    key = derive_key(master_pw, salt)
-                    plaintext = decrypt_content(ciphertext, key, nonce)
-                    content = plaintext.decode("utf-8") if plaintext else ""
-                except Exception:
-                    content = ""  # 解密失败则传空 content
+            salt_b64 = capsule.get("salt")
+            if not salt_b64:
+                # 无盐值说明没有加密 content，跳过此胶囊
+                errors.append({"id": capsule["id"], "error": "no salt, capsule not encrypted"})
+                continue
 
-            # ── 上传到 huper 云端 ───────────────────
+            salt = base64.b64decode(salt_b64)
+            key  = derive_key(master_pw, salt)
+
+            # ── content：已在本地加密，直接传密文 ──────────
+            content_enc   = capsule.get("content") or ""
+            content_nonce = capsule.get("nonce")   or ""
+
+            # ── memo：本地加密 ───────────────────────────
+            memo = (capsule.get("memo") or "").encode("utf-8")
+            memo_ct, memo_nonce = encrypt_content(memo, key)
+            memo_enc   = base64.b64encode(memo_ct).decode()
+            memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
+
+            # ── tags：本地加密 ───────────────────────────
+            tags = (capsule.get("tags") or "").encode("utf-8")
+            tags_ct, tags_nonce = encrypt_content(tags, key)
+            tags_enc   = base64.b64encode(tags_ct).decode()
+            tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
+
+            # ── 上传密文到 huper 云端 ────────────────────
             payload = {
-                "memo": capsule.get("memo", ""),
-                "content": content,
-                "tags": capsule.get("tags", ""),
-                "session_id": capsule.get("session_id"),
-                "window_title": capsule.get("window_title"),
-                "url": capsule.get("url"),
+                "e2e":           True,
+                "salt":          salt_b64,
+                "memo_enc":      memo_enc,
+                "memo_nonce":    memo_nonce_b64,
+                "content_enc":   content_enc,
+                "content_nonce": content_nonce,
+                "tags_enc":      tags_enc,
+                "tags_nonce":    tags_nonce_b64,
+                "created_at":    capsule.get("created_at"),
+                "session_id":    capsule.get("session_id"),
             }
+
             with httpx.Client(timeout=15.0) as client:
                 resp = client.post(
                     f"{huper_url}/capsules",
                     json=payload,
                     headers={"Authorization": f"Bearer {api_token}"}
                 )
+
             if resp.status_code in (200, 201):
                 mark_synced(capsule["id"])
                 synced_count += 1
             else:
                 errors.append({"id": capsule["id"], "status": resp.status_code, "body": resp.text[:100]})
+
         except Exception as e:
             errors.append({"id": capsule["id"], "error": str(e)})
 
     h = add_cors_headers(request)
     return JSONResponse({
         "synced": synced_count,
-        "total": len(unsynced),
+        "total":  len(unsynced),
         "errors": errors if errors else None,
     }, headers=h)
 
