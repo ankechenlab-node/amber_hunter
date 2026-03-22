@@ -7,10 +7,10 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/leo/.openclaw/skills/amber-hunter/amber_hunter.py</string>
+        <string>AMBER_HUNTER_DIR/amber_hunter.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/leo/.openclaw/skills/amber-hunter</string>
+    <string>AMBER_HUNTER_DIR</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

@@ -78,7 +78,8 @@ if $IS_MAC; then
   mkdir -p "$HOME/Library/LaunchAgents"
   # amber-hunter 主服务
   PLIST="$HOME/Library/LaunchAgents/com.huper.amber-hunter.plist"
-  sed "s|/Users/leo|$HOME|g" "$HUNTER_DIR/com.huper.amber-hunter.plist" > "$PLIST"
+  sed -e "s|AMBER_HUNTER_DIR|$HUNTER_DIR|g" \
+      "$HUNTER_DIR/com.huper.amber-hunter.plist" > "$PLIST"
   chmod 644 "$PLIST"
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST" 2>/dev/null || true
