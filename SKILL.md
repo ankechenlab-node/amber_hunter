@@ -1,166 +1,155 @@
 # Amber-Hunter Skill
 
-> Huper琥珀本地感知引擎
-> 版本：0.8.7 | 2026-03-22
+> Local memory engine for Huper琥珀
+> Version: 0.8.7 | 2026-03-22
 
 ---
 
-> amber-hunter 运行在用户的本地机器上（Mac / Linux / Windows），agent 通过 `localhost:18998` 与它通信。
-
-
-## 功能定位
-
-Amber-Hunter 是琥珀的**入口层**，GitHub 公开免费。让用户零门槛感受"即时冻结当下"的 AI 协作记忆力。
-
-- **免费、公开、零门槛** — 无需账号即可立即使用
-- **核心价值**：即时冻结当下——让 AI 协作的记忆力可被唤醒
-- **可选升级**：注册 huper.org 账号解锁跨设备云端同步
+> amber-hunter runs on the user's local machine (Mac / Linux / Windows). Agents communicate with it via `localhost:18998`.
 
 ---
 
-## 核心功能
+## What It Does
 
-- **Session 读取**：读取 OpenClaw / Claude 实时对话历史，作为冻结内容摘要
-- **文件监控**：监控 workspace 最近修改的文件列表
-- **本地加密存储**：AES-256-GCM 加密，master_password 存系统密钥链
-- **云端同步**：加密后上传 huper.org（可选，需注册账号）
+Amber-Hunter is the **capture layer** of Huper琥珀 — free, open-source, and zero-barrier. It lets users experience "freeze this moment" AI collaboration memory with no account required.
 
----
-
-## API 端点（v0.8.4）
-
-| 端点 | 方法 | 认证 | 说明 |
-|------|------|------|------|
-| `/status` | GET | 无 | 服务状态 |
-| `/memories` | GET | **无需认证** | 本地记忆快照（仅 localhost） |
-| `/token` | GET | localhost | 获取本地 API key |
-| `/session/summary` | GET | 无 | OpenClaw/Claude session 摘要 |
-| `/session/files` | GET | 无 | Workspace 最近文件 |
-| `/freeze` | GET/POST | Bearer token 或 ?token= | 触发 freeze |
-| `/capsules` | GET | Bearer token | 本地胶囊列表 |
-| `/capsules` | POST | Bearer token | 创建胶囊 |
-| `/capsules/{id}` | GET | Bearer token | 读取单个胶囊 |
-| `/capsules/{id}` | DELETE | Bearer token | 删除胶囊 |
-| `/sync` | GET | Bearer token 或 ?token= | 云端同步（需注册） |
-| `/config` | GET/POST | Bearer token 或 ?token= | 读取/设置配置 |
-| `/recall` | GET | Bearer token 或 ?token= | 主动检索相关记忆 |
-| `/master-password` | POST | localhost | 设置 master_password |
+- **Free & open** — works immediately after install, no account needed
+- **Core value**: freeze the current moment — make AI collaboration memory retrievable
+- **Optional upgrade**: register at huper.org to unlock cross-device cloud sync
 
 ---
 
-## 认证方式
+## Core Features
 
-### 方式一：Bearer Header（服务器间调用）
+- **Session capture** — reads OpenClaw / Claude live conversation history as freeze content
+- **File monitoring** — tracks recently modified files in the workspace
+- **Local encrypted storage** — AES-256-GCM encryption, master_password stored in OS keychain
+- **Cloud sync** — encrypted upload to huper.org (optional, requires account)
+
+---
+
+## API Endpoints (v0.8.7)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/status` | GET | none | Service status |
+| `/memories` | GET | **none** | Local memory snapshot (localhost only) |
+| `/token` | GET | localhost | Get local API key |
+| `/session/summary` | GET | none | OpenClaw/Claude session summary |
+| `/session/files` | GET | none | Recent workspace files |
+| `/freeze` | GET/POST | Bearer or ?token= | Trigger freeze |
+| `/capsules` | GET | Bearer | List local capsules |
+| `/capsules` | POST | Bearer | Create capsule |
+| `/capsules/{id}` | GET | Bearer | Read capsule |
+| `/capsules/{id}` | DELETE | Bearer | Delete capsule |
+| `/sync` | GET | Bearer or ?token= | Cloud sync (requires account) |
+| `/config` | GET/POST | Bearer or ?token= | Read/set config |
+| `/recall` | GET | Bearer or ?token= | Retrieve relevant memories |
+| `/master-password` | POST | localhost | Set master_password |
+
+---
+
+## Authentication
+
+### Bearer Header (server-to-server)
 ```
 Authorization: Bearer <api_key>
 ```
 
-### 方式二：Query Parameter（浏览器跨域兼容）
+### Query Parameter (browser cross-origin compatible)
 ```
 GET /freeze?token=<api_key>
 GET /sync?token=<api_key>
 ```
 
-> ⚠️ 浏览器从 HTTPS 页面发请求到 HTTP localhost 时，Authorization header 会被拦截。因此前端使用 query parameter 方式。
+> Note: Browsers block `Authorization` headers on HTTPS→HTTP localhost requests, so the frontend uses query parameters instead.
 
 ---
 
-## 安装
+## Installation
 
-### 平台支持
+### Platform Support
 
-| 平台 | 开机自启方式 | 密钥链 |
-|------|------------|--------|
+| Platform | Auto-start | Keychain |
+|----------|-----------|---------|
 | **macOS** | LaunchAgent (launchctl) | macOS Keychain |
-| **Linux** | systemd 用户服务 | GNOME Keyring (secret-tool) |
-| **Windows** | 任务计划程序 (schtasks) | Windows 凭据管理器 (cmdkey) |
+| **Linux** | systemd user service | GNOME Keyring (secret-tool) |
+| **Windows** | Task Scheduler (schtasks) | Windows Credential Manager |
 
-### 前置条件
-
-- macOS / Linux / Windows（用户的本地电脑）
+### Prerequisites
+- macOS / Linux / Windows (user's local machine)
 - Python 3.10+
 
-### 快速安装（在用户本地机器上执行）
-
+### Quick Install (run on the user's local machine)
 ```bash
 bash ~/.openclaw/skills/amber-hunter/install.sh
 ```
 
-### 手动安装
-
+### Manual Install
 ```bash
-# 1. 安装依赖
+# 1. Install dependencies
 pip install -r ~/.openclaw/skills/amber-hunter/requirements.txt
 
-# 2. 启动服务（无需账号）
+# 2. Start service (no account needed)
 python3 ~/.openclaw/skills/amber-hunter/amber_hunter.py &
 
-# 3. 验证安装
+# 3. Verify
 curl http://localhost:18998/status
-curl http://localhost:18998/memories   # 查看本地记忆（无需认证）
+curl http://localhost:18998/memories
 ```
 
 ---
 
-## 开机自启
+## Auto-start
 
-**install.sh 会自动配置，无需手动操作。**
+`install.sh` configures this automatically.
 
-| 平台 | 命令 |
-|------|------|
+| Platform | Command |
+|----------|---------|
 | macOS | `launchctl load ~/Library/LaunchAgents/com.huper.amber-hunter.plist` |
 | Linux | `systemctl --user start amber-hunter` |
-| Windows | 任务计划已自动创建（登录时启动） |
+| Windows | Task Scheduler entry created automatically at login |
 
 ---
 
-## 配置说明
+## Config & Storage
 
-- `~/.amber-hunter/config.json`：API Key 和 Huper URL
-- `~/.amber-hunter/hunter.db`：本地胶囊 SQLite 数据库
-- `~/.amber-hunter/amber-hunter.log`：运行日志
-- **系统密钥链**（macOS Keychain / Linux GNOME Keyring / Windows 凭据管理器）：存储 `master_password`，不落磁盘
+- `~/.amber-hunter/config.json` — API key and Huper URL
+- `~/.amber-hunter/hunter.db` — local capsule SQLite database
+- `~/.amber-hunter/amber-hunter.log` — service log
+- **OS keychain** (macOS Keychain / Linux GNOME Keyring / Windows Credential Manager) — stores `master_password`, never written to disk
 
 ---
 
-## 使用流程
+## Usage
 
-### 无账号（立即可用）
-
-安装完成后直接使用，无需注册：
-
+### No account (immediate use)
 ```bash
-# 查看本地记忆
+# View local memories
 curl http://localhost:18998/memories
 
-# 获取 API token（用于 OpenClaw/Claude 集成）
+# Get API token for OpenClaw/Claude integration
 curl http://localhost:18998/token
 ```
 
-### 可选：注册 huper.org 账号解锁云同步
-
-1. 打开 https://huper.org 注册账号
-2. 在 dashboard 获取 API Key，填入 `~/.amber-hunter/config.json`
-3. 设置 master_password（本地加密密钥，不会上传到服务器）
-4. 启用云端同步后，可在多设备之间访问记忆
+### Optional: register huper.org for cloud sync
+1. Go to https://huper.org and create an account
+2. Get your API key from the dashboard, add it to `~/.amber-hunter/config.json`
+3. Set a master_password (local encryption key — never uploaded)
+4. Enable cloud sync to access memories across devices
 
 ---
 
-## 故障排除
+## Troubleshooting
 
-### amber-hunter 无法连接
+### amber-hunter not connecting
 ```bash
-# 检查状态
 curl http://localhost:18998/status
-
-# 重启服务
 python3 ~/.openclaw/skills/amber-hunter/amber_hunter.py &
-
-# 查看日志
 tail -f ~/.amber-hunter/amber-hunter.log
 ```
 
-### Linux：secret-tool 未安装
+### Linux: secret-tool not installed
 ```bash
 # Ubuntu/Debian
 sudo apt install libsecret-tools
@@ -172,10 +161,10 @@ sudo pacman -S libsecret
 
 ---
 
-## 版本历史
+## Version History
 
-- **v0.8.4**（2026-03-22）：跨平台支持（macOS/Linux/Windows）、E2E 加密、/memories 无账号本地访问、Claude Cowork session 支持
-- **v0.8.3**（2026-03-22）：初始版本
+- **v0.8.7** (2026-03-22): Removed VPS warning, English-only SKILL.md, localhost-only security annotations
+- **v0.8.4** (2026-03-22): Cross-platform support (macOS/Linux/Windows), E2E encryption, /memories no-auth local access, Claude Cowork session support
 
 ---
 
