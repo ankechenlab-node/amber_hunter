@@ -138,6 +138,37 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
     }, headers=h)
 
 # ── 胶囊 CRUD（需认证）──────────────────────────────────
+@app.get("/memories")
+def get_memories(limit: int = 20, request: Request = None):
+    """
+    本地记忆快照——无需账号，仅限 localhost 访问。
+    让新用户装完立刻看到价值，注册 huper.org 后可跨设备同步。
+    """
+    if request and request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="仅限本地访问 / localhost only")
+    capsules = list_capsules(limit=max(1, min(limit, 100)))
+    h = add_cors_headers(request) if request else {}
+    items = []
+    for c in capsules:
+        items.append({
+            "id":         c["id"],
+            "memo":       c["memo"],
+            "tags":       c["tags"],
+            "source":     c.get("window_title") or c.get("session_id") or "unknown",
+            "created_at": c["created_at"],
+            "synced":     bool(c["synced"]),
+            "encrypted":  bool(c.get("salt")),
+        })
+    return JSONResponse({
+        "total":    len(items),
+        "memories": items,
+        "hint":     (
+            "这是你的本地记忆快照，数据已加密存储在本机。"
+            "注册 huper.org 账号后可跨设备同步，并通过 AI 主动召回相关记忆。"
+        ),
+    }, headers=h)
+
+
 @app.get("/capsules")
 def list_capsules_handler(authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
