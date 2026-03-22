@@ -250,6 +250,97 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
 
+# ── 云端同步（需认证）────────────────────────────────
+@app.post("/sync")
+def sync_to_cloud(request: Request, authorization: str = Header(None)):
+    """
+    将本地未同步的胶囊加密上传到 huper 云端。
+    流程：读取未同步胶囊 → 解密 content → POST 到云端 → 标记已同步
+    """
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+
+    api_token = get_api_token()
+    huper_url = get_huper_url() or "https://huper.org/api"
+    master_pw = get_master_password()
+    if not master_pw:
+        return JSONResponse(
+            {"error": "master_password not set", "detail": "请在 dashboard 设置 master_password"},
+            status_code=400,
+            headers=add_cors_headers(request)
+        )
+
+    import httpx
+    unsynced = get_unsynced_capsules()
+    if not unsynced:
+        return JSONResponse({"synced": 0, "message": "没有需要同步的胶囊"}, headers=add_cors_headers(request))
+
+    synced_count = 0
+    errors = []
+    for capsule in unsynced:
+        try:
+            # ── 解密 content ──────────────────────────
+            content = capsule.get("content") or ""
+            if capsule.get("salt") and capsule.get("nonce") and content:
+                import base64
+                try:
+                    salt = base64.b64decode(capsule["salt"])
+                    nonce = base64.b64decode(capsule["nonce"])
+                    ciphertext = base64.b64decode(content)
+                    key = derive_key(master_pw, salt)
+                    plaintext = decrypt_content(ciphertext, key, nonce)
+                    content = plaintext.decode("utf-8") if plaintext else ""
+                except Exception:
+                    content = ""  # 解密失败则传空 content
+
+            # ── 上传到 huper 云端 ───────────────────
+            payload = {
+                "memo": capsule.get("memo", ""),
+                "content": content,
+                "tags": capsule.get("tags", ""),
+                "session_id": capsule.get("session_id"),
+                "window_title": capsule.get("window_title"),
+                "url": capsule.get("url"),
+            }
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(
+                    f"{huper_url}/capsules",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_token}"}
+                )
+            if resp.status_code in (200, 201):
+                mark_synced(capsule["id"])
+                synced_count += 1
+            else:
+                errors.append({"id": capsule["id"], "status": resp.status_code, "body": resp.text[:100]})
+        except Exception as e:
+            errors.append({"id": capsule["id"], "error": str(e)})
+
+    h = add_cors_headers(request)
+    return JSONResponse({
+        "synced": synced_count,
+        "total": len(unsynced),
+        "errors": errors if errors else None,
+    }, headers=h)
+
+# ── master_password 设置（Dashboard 用）────────────────
+from pydantic import BaseModel
+class MasterPasswordIn(BaseModel):
+    password: str
+
+@app.post("/master-password")
+def set_master_password_handler(password_in: MasterPasswordIn, request: Request):
+    """设置 master_password（存 macOS Keychain）"""
+    client = request.client
+    if client and client.host not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    ok = set_master_password(password_in.password)
+    return JSONResponse({"ok": ok}, headers=add_cors_headers(request))
+
 # ── 本地 Token（仅 localhost 可读）──────────────────────
 @app.get("/token")
 def get_local_token(request: Request):

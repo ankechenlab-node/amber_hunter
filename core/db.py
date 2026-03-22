@@ -126,6 +126,19 @@ def mark_synced(capsule_id: str):
     conn.close()
 
 
+def get_unsynced_capsules() -> list[dict]:
+    """返回所有未同步的胶囊（含加密 content，用于云端上传）"""
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    rows = c.execute(
+        "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,encrypted_len,content_hash,synced "
+        "FROM capsules WHERE synced=0"
+    ).fetchall()
+    conn.close()
+    keys = ["id","memo","content","tags","session_id","window_title","url","created_at","salt","nonce","encrypted_len","content_hash","synced"]
+    return [dict(zip(keys, r)) for r in rows]
+
+
 def get_config(key: str) -> str | None:
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
