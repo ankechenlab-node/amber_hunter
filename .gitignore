@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.amber-hunter/
+*.log
