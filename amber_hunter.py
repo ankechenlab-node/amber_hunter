@@ -149,7 +149,7 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
     files = get_recent_files(limit=5)
-    prefill = session_data.get("last_user_message", "") or ""
+    prefill = session_data.get("last_topic", "") or ""
     if files:
         file_names = "; ".join([f"{f['path']}" for f in files])
         prefill = f"{prefill}\n\n相关文件：{file_names}" if prefill else file_names
@@ -159,6 +159,7 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
         "session_key": session_key,
         "prefill": prefill[:500],
         "summary": session_data.get("summary", ""),
+        "preferences": session_data.get("preferences", []),
         "files": files[:5],
         "timestamp": time.time(),
     }, headers=h)
