@@ -38,29 +38,219 @@ from starlette.responses import Response
 _EMBED_MODEL = None
 
 # ── 本地轻量标签生成（无需网络/ML，关键词匹配）────────────────────────
-def _auto_tag_local(text: str, existing_tags: str = "") -> str:
-    """本地关键词自动打标签，zero-dependency。
-    在 create_capsule 时调用，tags 上传前本地完成，服务端无需处理内容。
+# ── v0.8.9: 可扩展 Topic 分类系统 ─────────────────────────
+
+# 默认 16 个 topic（用户可在 config.json 里自定义扩展）
+DEFAULT_TOPICS = [
+    {
+        "name": "工作",
+        "emoji": "💼",
+        "keywords": ["项目", "客户", "周报", "deadline", "需求", "任务", "汇报", "职场", "上班", "老板"],
+    },
+    {
+        "name": "技术",
+        "emoji": "⚙️",
+        "keywords": ["代码", "bug", "api", "部署", "服务器", "python", "数据库", "架构", "接口", "调试"],
+    },
+    {
+        "name": "学习",
+        "emoji": "📚",
+        "keywords": ["课程", "教程", "学习", "读书", "研究", "论文", "理解", "概念", "知识点"],
+    },
+    {
+        "name": "创意",
+        "emoji": "💡",
+        "keywords": ["灵感", "创意", "idea", "想法", "创新", "方案", "思路", "设计", "构思"],
+    },
+    {
+        "name": "偏好",
+        "emoji": "❤️",
+        "keywords": ["我喜欢", "我一般", "我比较", "i prefer", "i like", "i usually",
+                     "我不喜欢", "我偏向", "我的习惯", "我宁愿"],
+    },
+    {
+        "name": "健康",
+        "emoji": "🏃",
+        "keywords": ["健康", "运动", "锻炼", "睡眠", "减肥", "身体", "医生", "体检", "饮食"],
+    },
+    {
+        "name": "财务",
+        "emoji": "💰",
+        "keywords": ["钱", "投资", "理财", "收入", "支出", "预算", "存款", "股票", "工资", "报销"],
+    },
+    {
+        "name": "生活",
+        "emoji": "🌿",
+        "keywords": ["做饭", "吃饭", "天气", "周末", "购物", "家务", "日用品", "生活琐事"],
+    },
+    {
+        "name": "人际",
+        "emoji": "🤝",
+        "keywords": ["朋友", "同事", "合作", "沟通", "社交", "关系", "聚会", "人情"],
+    },
+    {
+        "name": "家庭",
+        "emoji": "🏠",
+        "keywords": ["家", "父母", "孩子", "宝宝", "伴侣", "亲人", "结婚", "装修", "育儿"],
+    },
+    {
+        "name": "旅行",
+        "emoji": "✈️",
+        "keywords": ["旅行", "旅游", "出行", "机票", "酒店", "行程", "签证", "景点", "度假"],
+    },
+    {
+        "name": "娱乐",
+        "emoji": "🎬",
+        "keywords": ["电影", "音乐", "游戏", "剧", "综艺", "小说", "追剧", "演唱会"],
+    },
+    {
+        "name": "灵感",
+        "emoji": "✨",
+        "keywords": ["突然想到", "灵感", "一闪", "冒出来", "game changer", "有意思",
+                     "没想到", "原来如此", "竟然", " breakthrough"],
+    },
+    {
+        "name": "决策",
+        "emoji": "🎯",
+        "keywords": ["决定", "确定", "选择", "方案定了", "decided", "going with",
+                     "最终方案", "采用", "放弃", "取舍"],
+    },
+    {
+        "name": "情绪",
+        "emoji": "🌧️",
+        "keywords": ["开心", "高兴", "沮丧", "焦虑", "兴奋", "压力大", "累", "疲惫",
+                     "期待", "失望", "感动"],
+    },
+    {
+        "name": "项目",
+        "emoji": "📦",
+        "keywords": ["项目", "里程碑", "迭代", "上线", "发布", "验收", "需求评审", "PRD"],
+    },
+]
+
+# 敏感类 topic（必须有明确信号词才打，不能只用关键词命中）
+EXPLICIT_ONLY_TOPICS = {"偏好", "情绪", "决策"}
+
+
+def _get_topics_from_config() -> list[dict]:
+    """从 config.json 读取用户自定义 topics，缺失时返回默认 topics."""
+    try:
+        cfg_path = HOME / ".amber-hunter" / "config.json"
+        if cfg_path.exists():
+            import json as _json
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = _json.load(f)
+            custom = cfg.get("topics", [])
+            if custom and isinstance(custom, list) and len(custom) > 0:
+                return custom
+    except Exception:
+        pass
+    return DEFAULT_TOPICS
+
+
+_EMBED_MODEL = None
+
+
+def _get_embed_model():
+    """懒加载向量模型（all-MiniLM-L6-v2）."""
+    global _EMBED_MODEL
+    if _EMBED_MODEL is not None:
+        return _EMBED_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+        _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        return _EMBED_MODEL
+    except Exception:
+        return None
+
+
+def _cosine_sim(a: list, b: list) -> float:
+    """计算两个向量的 cosine similarity."""
+    import math
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def classify_topics(text: str, existing_tags: str = "") -> str:
+    """
+    v0.8.9: 可扩展 topic 分类。
+
+    策略：
+    1. 关键词匹配（所有用户可用）
+    2. 向量模型精调（有模型时）：text vs topic vectors，cosine similarity
+
+    敏感类（偏好/情绪/决策）：必须命中显式关键词，不走向量
+    其他类：关键词命中 ≥ 1 → 进入候选；向量 top1 > 0.35 → 加入结果
+    最多返回 3 个 topic。
     """
     if not text:
         return existing_tags or ""
-    SIGNALS = {
-        "correction": ["actually", "not quite", "incorrect", "wrong", "not right",
-                       "不对", "错了", "不是", "应该是"],
-        "decision":   ["decided", "we'll go with", "final answer", "going with",
-                       "决定", "确定", "选择", "方案定了"],
-        "preference": ["i prefer", "i like", "i don't like", "i want", "i need",
-                       "喜欢", "不喜欢", "想要", "偏好"],
-        "discovery":  ["found out", "turns out", "realized", "interesting", "discovered",
-                       "发现", "原来", "有意思", "竟然"],
-        "error_fix":  ["bug", "fixed", "issue", "resolved", "error", "broken",
-                       "修复", "解决", "报错", "问题"],
-    }
-    tl = text.lower()
-    detected = [tag for tag, kws in SIGNALS.items() if any(kw in tl for kw in kws)]
+
+    topics = _get_topics_from_config()
+    text_lower = text.lower()
+    candidate_topics = []
+    topic_scores = {}
+
+    # ── Step 1: 关键词匹配 ────────────────────────────
+    for topic in topics:
+        name = topic["name"]
+        kws = topic.get("keywords", [])
+        hit_count = sum(1 for kw in kws if kw.lower() in text_lower)
+
+        # 敏感类：必须显式命中关键词
+        if name in EXPLICIT_ONLY_TOPICS:
+            if hit_count > 0:
+                candidate_topics.append(name)
+                topic_scores[name] = 1.0
+            continue
+
+        if hit_count > 0:
+            candidate_topics.append(name)
+            topic_scores[name] = min(hit_count / 2.0, 1.0)  # 归一化 0~1
+
+    # ── Step 2: 向量模型精调（有模型时）───────────────
+    model = _get_embed_model()
+    if model and text.strip():
+        try:
+            text_vec = model.encode(text[:1000])  # 截断避免太长
+            for topic in topics:
+                name = topic["name"]
+                # 跳过敏感类（已在上一步处理）
+                if name in EXPLICIT_ONLY_TOPICS:
+                    continue
+                # 用 keywords 作为 topic 向量的代理
+                kws = topic.get("keywords", [])
+                if not kws:
+                    continue
+                kw_text = " ".join(kws[:8])  # 最多8个关键词
+                topic_vec = model.encode(kw_text)
+                sim = _cosine_sim(text_vec.tolist(), topic_vec.tolist())
+                if sim > 0.35 and name not in topic_scores:
+                    candidate_topics.append(name)
+                    topic_scores[name] = sim
+                elif sim > topic_scores.get(name, 0):
+                    topic_scores[name] = sim
+        except Exception:
+            pass
+
+    # ── Step 3: 合并已有标签，取 top 3 ─────────────────
     existing = [t.strip() for t in existing_tags.split(",") if t.strip()] if existing_tags else []
-    merged = list(dict.fromkeys(existing + detected))
-    return ",".join(merged) if merged else (existing_tags or "")
+    result = list(dict.fromkeys(existing))
+
+    # 按 score 排序，取 top 3（不含已有的）
+    for name in sorted(candidate_topics, key=lambda n: topic_scores.get(n, 0), reverse=True)[:3]:
+        if name not in result:
+            result.append(name)
+
+    return ",".join(result) if result else existing_tags or ""
+
+
+# 兼容旧名称
+_auto_tag_local = classify_topics
 
 
 from pydantic import BaseModel
@@ -105,6 +295,16 @@ def add_cors_headers(request: Request):
     if origin in ALLOWED_ORIGINS:
         return {"access-control-allow-origin": origin, "access-control-allow-credentials": "true"}
     return {}
+
+# ── Topic 分类接口（无认证，供 amber-proactive 调用）─────
+@app.get("/classify")
+def api_classify(request: Request, text: str = ""):
+    """对一段文本进行 topic 分类，返回逗号分隔的标签字符串."""
+    headers = add_cors_headers(request)
+    if not text or len(text.strip()) < 5:
+        return JSONResponse({"topics": ""}, headers=headers)
+    topics = classify_topics(text)
+    return JSONResponse({"topics": topics}, headers=headers)
 
 # ── Session 读取（无认证，供前端读取）──────────────────
 @app.get("/session/summary")
