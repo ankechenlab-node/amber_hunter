@@ -1,7 +1,6 @@
 # Amber-Hunter Skill
-
 > Local memory engine for Huper琥珀
-> Version: 0.8.7 | 2026-03-22
+> Version: 0.9.0 | 2026-03-24
 
 ---
 
@@ -24,11 +23,15 @@ Amber-Hunter is the **capture layer** of Huper琥珀 — free, open-source, and 
 - **Session capture** — reads OpenClaw / Claude live conversation history as freeze content
 - **File monitoring** — tracks recently modified files in the workspace
 - **Local encrypted storage** — AES-256-GCM encryption, master_password stored in OS keychain
+- **Active Recall** — `/recall?q=<query>` retrieves relevant past memories before responding; supports keyword + semantic (sentence-transformers) search
+- **Proactive Memory Capture** — background agent auto-detects significant moments (corrections, decisions, preferences, discoveries) every 10 min; completely silent
+- **Topic Classification** — `/classify` endpoint categorizes capsules into 16 topics with vector fine-tuning; used by amber-proactive
+- **Memory layer** — paragraph-level summarization (20-message window) + preference extraction (24 signal keywords) per freeze
 - **Cloud sync** — encrypted upload to huper.org (optional, requires account)
 
 ---
 
-## API Endpoints (v0.8.7)
+## API Endpoints (v0.9.0)
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -42,9 +45,10 @@ Amber-Hunter is the **capture layer** of Huper琥珀 — free, open-source, and 
 | `/capsules` | POST | Bearer | Create capsule |
 | `/capsules/{id}` | GET | Bearer | Read capsule |
 | `/capsules/{id}` | DELETE | Bearer | Delete capsule |
+| `/recall` | GET | Bearer or ?token= | Retrieve relevant memories (`?q=<query>&limit=3`) |
+| `/classify` | GET/POST | Bearer or ?token= | Topic classification (16 topics, vector-tuned) |
 | `/sync` | GET | Bearer or ?token= | Cloud sync (requires account) |
-| `/config` | GET/POST | Bearer or ?token= | Read/set config |
-| `/recall` | GET | Bearer or ?token= | Retrieve relevant memories |
+| `/config` | GET/POST | Bearer or ?token= | Read/set config (incl. auto_sync) |
 | `/master-password` | POST | localhost | Set master_password |
 
 ---
@@ -60,6 +64,7 @@ Authorization: Bearer <api_key>
 ```
 GET /freeze?token=<api_key>
 GET /sync?token=<api_key>
+GET /recall?token=<api_key>&q=your+query
 ```
 
 > Note: Browsers block `Authorization` headers on HTTPS→HTTP localhost requests, so the frontend uses query parameters instead.
@@ -71,7 +76,7 @@ GET /sync?token=<api_key>
 ### Platform Support
 
 | Platform | Auto-start | Keychain |
-|----------|-----------|---------|
+|----------|-----------|---------| 
 | **macOS** | LaunchAgent (launchctl) | macOS Keychain |
 | **Linux** | systemd user service | GNOME Keyring (secret-tool) |
 | **Windows** | Task Scheduler (schtasks) | Windows Credential Manager |
@@ -105,7 +110,7 @@ curl http://localhost:18998/memories
 `install.sh` configures this automatically.
 
 | Platform | Command |
-|----------|---------|
+|----------|---------| 
 | macOS | `launchctl load ~/Library/LaunchAgents/com.huper.amber-hunter.plist` |
 | Linux | `systemctl --user start amber-hunter` |
 | Windows | Task Scheduler entry created automatically at login |
@@ -127,6 +132,9 @@ curl http://localhost:18998/memories
 ```bash
 # View local memories
 curl http://localhost:18998/memories
+
+# Active recall — retrieve relevant past memories
+curl "http://localhost:18998/recall?token=<api_key>&q=what+did+we+decide+about+auth"
 
 # Get API token for OpenClaw/Claude integration
 curl http://localhost:18998/token
@@ -163,6 +171,9 @@ sudo pacman -S libsecret
 
 ## Version History
 
+- **v0.9.0** (2026-03-24): Active Recall `/recall`, Proactive Memory Capture (background agent), cross-platform auto-start, cross-platform keychain
+- **v0.8.9** (2026-03-23): Topic classification system (16 topics + vector fine-tuning + sensitive keyword override), `/classify` endpoint for amber-proactive
+- **v0.8.8** (2026-03-23): Memory layer refactor — paragraph-level summarization (20-message window), preference extraction (24 signal keywords), `preferences` field in freeze
 - **v0.8.7** (2026-03-22): Removed VPS warning, English-only SKILL.md, localhost-only security annotations
 - **v0.8.4** (2026-03-22): Cross-platform support (macOS/Linux/Windows), E2E encryption, /memories no-auth local access, Claude Cowork session support
 
