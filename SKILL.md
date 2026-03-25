@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Local memory engine for Huper琥珀
-> Version: 0.9.0 | 2026-03-24
+> Version: 0.8.9 | 2026-03-26
 
 ---
 
@@ -171,7 +171,7 @@ sudo pacman -S libsecret
 
 ## Version History
 
-- **v0.9.0** (2026-03-24): Active Recall `/recall`, Proactive Memory Capture (background agent), cross-platform auto-start, cross-platform keychain
+- **v0.8.9** (2026-03-26): Session capture targets Anke Telegram session; system message filtering; OpenClaw queue/exec cleanup; `get_current_session_key()` Telegram priority over Claude Cowork
 - **v0.8.9** (2026-03-23): Topic classification system (16 topics + vector fine-tuning + sensitive keyword override), `/classify` endpoint for amber-proactive
 - **v0.8.8** (2026-03-23): Memory layer refactor — paragraph-level summarization (20-message window), preference extraction (24 signal keywords), `preferences` field in freeze
 - **v0.8.7** (2026-03-22): Removed VPS warning, English-only SKILL.md, localhost-only security annotations
