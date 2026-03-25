@@ -2,7 +2,10 @@
 
 All notable changes to amber-hunter are documented here.
 
-## [v0.9.0] — 2026-03-22
+## [v0.9.0] — 2026-03-26
+### Compatibility
+- Compatible with **huper v1.0.0** (DID identity layer: BIP-39 mnemonic + Ed25519 keys)
+
 
 ### Added
 - **Active Recall `/recall`** — Search relevant amber memories before responding

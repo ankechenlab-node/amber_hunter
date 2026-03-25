@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v0.8.4
+Amber-Hunter v0.9.0
 Huper琥珀本地感知引擎
 
-v0.8.4 修复：
-- 加密：content 字段 AES-256-GCM 加密后存储，salt+nonce 持久化
-- 认证：本地 API token 验证（防同一机器上其他进程滥用）
-- CORS：仅允许 huper.org
-- Keychain：master_password 读不到直接报错，不 fallback 到文件
-- Session：正则加了 try/except 保护，失败不影响整体运行
+兼容 huper v1.0.0（DID 身份层）
 """
 
 import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc
