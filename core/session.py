@@ -251,16 +251,21 @@ def _find_latest_claude_session() -> Path | None:
 def get_current_session_key() -> str | None:
     """
     返回最近活跃 session 的 key。
-    - OpenClaw session:  原有格式的 key 字符串
-    - Claude Cowork:     "claude::<绝对路径>"
-    自动选择两者中更新的一个。
+    - OpenClaw Telegram session:  优先，返回 key 字符串
+    - Claude Cowork:             次优先，"claude::<绝对路径>"
+    - 其他 OpenClaw session:      最后备选
+    优先 Telegram session 因为它包含 Anke 的真实对话内容，
+    而 Claude Cowork session 更新频繁但多为工具调用记录。
     """
-    # OpenClaw
-    oc_key = _get_openclaw_session_key()
-    oc_mtime = _openclaw_session_mtime(oc_key) if oc_key else 0.0
+    # 优先：OpenClaw Telegram session（Anke 真实对话）
+    tg_key = _get_openclaw_session_key()
+    if tg_key and "telegram" in tg_key.lower():
+        return tg_key
 
-    # Claude Cowork
+    # Claude Cowork 作为备选（比较 mtime）
     cl_path = _find_latest_claude_session()
+    oc_key  = tg_key  # 可能是其他 OpenClaw session
+    oc_mtime = _openclaw_session_mtime(oc_key) if oc_key else 0.0
     cl_mtime = cl_path.stat().st_mtime if cl_path else 0.0
 
     if cl_mtime > oc_mtime and cl_path is not None:
