@@ -27,9 +27,35 @@ else:
 _CLAUDE_PREFIX = "claude::"
 
 
+# ── 系统消息过滤 ────────────────────────────────────────────
+
+_SYSTEM_MSG_PATTERNS = (
+    "System:",           # OpenClaw 心跳/系统事件
+    "[Queued messages",  # OpenClaw 队列消息头
+    "Exec completed",   # OpenClaw exec 完成通知
+    "Conversation info", # Telegram 元数据包装
+    "Sender ",          # Telegram sender 元数据
+)
+
+# 排除的消息类型（非真实用户对话）
+_EXCLUDED_TYPES = {"toolResult", "toolCall", "system"}
+
+
+def _is_real_user_message(text: str) -> bool:
+    """判断一段文字是否是真实用户对话，而非 OpenClaw 内部系统消息。"""
+    if not text or len(text.strip()) < 3:
+        return False
+    # 排除以系统标记开头的内容
+    for pat in _SYSTEM_MSG_PATTERNS:
+        if pat in text:
+            return False
+    return True
+
+
 def _strip_telegram_meta(text: str) -> str:
-    """去除 Telegram 元数据，提取实际用户文本。"""
+    """去除 Telegram 元数据和 OpenClaw 系统事件包装，提取实际用户文本。"""
     try:
+        # Telegram 元数据
         text = re.sub(r'System:\s*\[[^\]]+\]\s*', '', text)
         text = re.sub(
             r'Conversation info[^`]*`{3,}json.*?`{3,}',
@@ -39,6 +65,11 @@ def _strip_telegram_meta(text: str) -> str:
             r'Sender[^`]*`{3,}json.*?`{3,}',
             '', text, flags=re.DOTALL
         )
+        # OpenClaw 队列消息标记
+        text = re.sub(r'\[Queued messages[^\]]*\]', '', text)
+        text = re.sub(r'Queued #\d+', '', text)
+        # OpenClaw exec 完成通知
+        text = re.sub(r'Exec completed[^:\n]*::[^\n]+', '', text)
     except Exception as e:
         print(f"[session] strip_telegram_meta error: {e}")
     return text.strip()
@@ -51,6 +82,11 @@ def _read_jsonl_messages(file_path: Path, limit: int = 100) -> list[dict]:
     从任意 JSONL 文件读取消息，兼容两种格式：
       OpenClaw:      {"type": "message", "message": {"role": ..., "content": [...]}}
       Claude Cowork: {"type": "user"|"assistant", "message": {"role": ..., "content": ...}}
+
+    过滤规则：
+      - 排除 toolResult / toolCall / system 类型
+      - 排除 OpenClaw 内部系统消息（System: / [Queued messages] / Exec completed 等）
+      - 仅保留真实用户对话
     """
     messages = []
     try:
@@ -62,6 +98,10 @@ def _read_jsonl_messages(file_path: Path, limit: int = 100) -> list[dict]:
                 try:
                     obj = json.loads(line)
                     msg_type = obj.get("type", "")
+
+                    # 排除非对话类型
+                    if msg_type in _EXCLUDED_TYPES:
+                        continue
 
                     # OpenClaw: type == "message"
                     if msg_type == "message":
@@ -91,10 +131,12 @@ def _read_jsonl_messages(file_path: Path, limit: int = 100) -> list[dict]:
                             if item.get("type") == "text":
                                 raw = item.get("text", "")
                                 cleaned = _strip_telegram_meta(raw)
-                                if cleaned:
+                                if cleaned and _is_real_user_message(cleaned):
                                     text_parts.append(cleaned)
                     elif isinstance(content, str):
-                        text_parts.append(_strip_telegram_meta(content))
+                        cleaned = _strip_telegram_meta(content)
+                        if cleaned and _is_real_user_message(cleaned):
+                            text_parts.append(cleaned)
 
                     if text_parts:
                         messages.append({
@@ -112,19 +154,32 @@ def _read_jsonl_messages(file_path: Path, limit: int = 100) -> list[dict]:
 # ── OpenClaw session 定位 ────────────────────────────────
 
 def _get_openclaw_session_key() -> str | None:
-    """返回 OpenClaw 最近活跃的 session key。"""
+    """
+    返回最近活跃的 session key。
+    优先规则：
+      1. 跳过当前 agent 的自身 session（agent:main:main）—— 包含系统操作，非用户对话
+      2. 优先找 Anke 的 Telegram session（telegram:1397306645）
+      3. 否则找最近一个有实质对话的 session
+    """
     try:
         if not SESSIONS_FILE.exists():
             return None
         sessions = json.loads(SESSIONS_FILE.read_text())
         if not sessions:
             return None
+
+        # 优先：Anke 的 Telegram session
+        tg_key = "agent:main:telegram:slash:1397306645"
+        if tg_key in sessions:
+            return tg_key
+
+        # 其次：按更新时间倒序，跳过 cron/subagent/当前 session
         for key, meta in sorted(
             sessions.items(),
             key=lambda x: x[1].get("updatedAt", 0),
             reverse=True
         ):
-            if "cron:" in key or "sub-agent" in key:
+            if any(skip in key for skip in ("cron:", "sub-agent", "agent:main:main")):
                 continue
             return key
     except Exception as e:
