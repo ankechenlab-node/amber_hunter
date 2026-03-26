@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Local memory engine for Huper琥珀
-> Version: 0.9.1 | 2026-03-26
+> Version: 0.9.2 | 2026-03-26
 
 ---
 
@@ -170,6 +170,8 @@ sudo pacman -S libsecret
 ---
 
 ## Version History
+- **v0.9.2** (2026-03-26): Fix semantic search — add sentence-transformers + numpy to requirements; remove unused mac-keychain
+- **v0.9.1** (2026-03-26): Remove hardcoded personal Telegram session ID; session capture now generic for any user
 
 - **v0.8.9** (2026-03-26): Session capture prioritizes active Telegram session; system message filtering; OpenClaw queue/exec cleanup; `get_current_session_key()` Telegram priority over Claude Cowork
 - **v0.8.9** (2026-03-23): Topic classification system (16 topics + vector fine-tuning + sensitive keyword override), `/classify` endpoint for amber-proactive

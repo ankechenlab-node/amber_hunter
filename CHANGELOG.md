@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.9.2] — 2026-03-26
+### Fixed
+- Add `sentence-transformers>=2.2.0` and `numpy>=1.24.0` to requirements.txt — semantic search now works out of the box after install
+- Remove unused `mac-keychain` package from requirements.txt (macOS keychain uses the built-in `security` CLI)
+- install.sh: show download size warning (~90MB) and surface pip errors instead of silently suppressing them
+
 ## [v0.9.1] — 2026-03-26
 ### Fixed
 - Removed hardcoded personal Telegram session ID; session capture now finds any user's active Telegram session generically

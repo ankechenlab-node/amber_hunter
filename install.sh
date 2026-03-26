@@ -28,15 +28,17 @@ fi
 
 # ── 1. 安装 Python 依赖 ────────────────────────────────
 echo "[1/5] 安装 Python 依赖..."
+echo "  ⚠️  首次安装包含语义搜索模型（sentence-transformers + all-MiniLM-L6-v2，约 90MB），请稍候..."
 if command -v pip &> /dev/null; then
-  pip install -q -r "$HUNTER_DIR/requirements.txt" 2>/dev/null || \
-  pip3 install -q -r "$HUNTER_DIR/requirements.txt" 2>/dev/null
+  pip install -r "$HUNTER_DIR/requirements.txt" || \
+  pip3 install -r "$HUNTER_DIR/requirements.txt"
 elif command -v conda &> /dev/null; then
-  conda install -q -y pip 2>/dev/null && pip install -q -r "$HUNTER_DIR/requirements.txt"
+  conda install -q -y pip 2>/dev/null && pip install -r "$HUNTER_DIR/requirements.txt"
 else
   echo "  ⚠️  未找到 pip，请先安装 Python 3.10+"
+  exit 1
 fi
-echo "  ✅ 依赖安装完成"
+echo "  ✅ 依赖安装完成（含语义搜索支持）"
 
 # ── 2. 配置 ─────────────────────────────────────────────
 echo "[2/5] 初始化配置..."

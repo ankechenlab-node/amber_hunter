@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v0.9.1
+Amber-Hunter v0.9.2
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
