@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.9.1] — 2026-03-26
+### Fixed
+- Removed hardcoded personal Telegram session ID; session capture now finds any user's active Telegram session generically
+- Cleaned personal name references from session logic comments
+
+
 All notable changes to amber-hunter are documented here.
 
 ## [v0.9.0] — 2026-03-26

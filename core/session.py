@@ -158,7 +158,7 @@ def _get_openclaw_session_key() -> str | None:
     返回最近活跃的 session key。
     优先规则：
       1. 跳过当前 agent 的自身 session（agent:main:main）—— 包含系统操作，非用户对话
-      2. 优先找 Anke 的 Telegram session（telegram:1397306645）
+      2. 优先找最近活跃的 Telegram session
       3. 否则找最近一个有实质对话的 session
     """
     try:
@@ -168,10 +168,13 @@ def _get_openclaw_session_key() -> str | None:
         if not sessions:
             return None
 
-        # 优先：Anke 的 Telegram session
-        tg_key = "agent:main:telegram:slash:1397306645"
-        if tg_key in sessions:
-            return tg_key
+        # 优先：最近活跃的 Telegram session（任意用户）
+        for _key, _meta in sorted(
+            sessions.items(),
+            key=lambda x: x[1].get("updatedAt", 0), reverse=True
+        ):
+            if "telegram" in _key.lower():
+                return _key
 
         # 其次：按更新时间倒序，跳过 cron/subagent/当前 session
         for key, meta in sorted(
@@ -254,10 +257,10 @@ def get_current_session_key() -> str | None:
     - OpenClaw Telegram session:  优先，返回 key 字符串
     - Claude Cowork:             次优先，"claude::<绝对路径>"
     - 其他 OpenClaw session:      最后备选
-    优先 Telegram session 因为它包含 Anke 的真实对话内容，
+    优先 Telegram session（通常包含真实对话内容），
     而 Claude Cowork session 更新频繁但多为工具调用记录。
     """
-    # 优先：OpenClaw Telegram session（Anke 真实对话）
+    # 优先：OpenClaw Telegram session
     tg_key = _get_openclaw_session_key()
     if tg_key and "telegram" in tg_key.lower():
         return tg_key
@@ -285,7 +288,18 @@ def read_session_messages(session_key: str, limit: int = 100) -> list[dict]:
     # OpenClaw
     try:
         path = _openclaw_key_to_path(session_key)
-        if path is None:
+        if path is None or not path.exists():
+            # Telegram/子 session 文件不存在时，降级读主 session agent:main:main
+            try:
+                sessions_data = json.loads(SESSIONS_FILE.read_text())
+                main_meta = sessions_data.get("agent:main:main", {})
+                main_sid = main_meta.get("sessionId", "")
+                if main_sid:
+                    main_path = AGENTS_DIR / "main" / "sessions" / f"{main_sid}.jsonl"
+                    if main_path.exists():
+                        return _read_jsonl_messages(main_path, limit)
+            except Exception:
+                pass
             return []
         return _read_jsonl_messages(path, limit)
     except Exception as e:
