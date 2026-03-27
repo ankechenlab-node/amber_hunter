@@ -31,7 +31,7 @@ Amber-Hunter is the **capture layer** of Huper琥珀 — free, open-source, and 
 
 ---
 
-## API Endpoints (v0.9.0)
+## API Endpoints (v0.9.4)
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -170,6 +170,8 @@ sudo pacman -S libsecret
 ---
 
 ## Version History
+- **v0.9.4** (2026-03-28): amber-proactive V3 — LLM extraction mode, no LLM call in skill, writes to pending_extract.jsonl for agent to process; bilingual triggers (中英双语); 20-message auto threshold; list_capsules content field fix
+- **v0.9.3** (2026-03-27): Fix CONFIG_PATH import, version strings unified, ensure_config_dir abs path fix, remove duplicate _EMBED_MODEL declaration
 - **v0.9.2** (2026-03-26): Fix semantic search — add sentence-transformers + numpy to requirements; remove unused mac-keychain
 - **v0.9.1** (2026-03-26): Remove hardcoded personal Telegram session ID; session capture now generic for any user
 
