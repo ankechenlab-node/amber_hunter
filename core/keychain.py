@@ -218,7 +218,7 @@ def get_huper_url() -> str:
 
 
 def ensure_config_dir():
-    Path(".amber-hunter").mkdir(exist_ok=True)
+    (HOME / ".amber-hunter").mkdir(parents=True, exist_ok=True)
 
 
 def get_os() -> str:

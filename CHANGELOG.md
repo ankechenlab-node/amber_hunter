@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.9.3] — 2026-03-27
+
+### Fixed
+- Import `CONFIG_PATH` from `core.keychain` in `amber_hunter.py` — `set_master_password_handler` was silently failing on the config.json fallback write due to `NameError` caught by bare `except Exception`
+- Unify all version strings to `0.9.2 → 0.9.3`: `FastAPI(version=...)`, `/status` response, `/` root response, and `main()` startup print were still reporting `0.8.9` / `v0.8.4` while the file header said `v0.9.2`
+- Fix `ensure_config_dir()` in `core/keychain.py` — was calling `Path(".amber-hunter").mkdir(...)` (relative to CWD) instead of `(HOME / ".amber-hunter").mkdir(parents=True, exist_ok=True)`, creating a spurious directory wherever the process was launched from
+- Remove duplicate `_EMBED_MODEL = None` module-level declaration (line 146 was redundant after line 33)
+
 ## [v0.9.2] — 2026-03-26
 ### Fixed
 - Add `sentence-transformers>=2.2.0` and `numpy>=1.24.0` to requirements.txt — semantic search now works out of the box after install

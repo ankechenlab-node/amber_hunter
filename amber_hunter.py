@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v0.9.2
+Amber-Hunter v0.9.3
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -15,7 +15,7 @@ from core.crypto import derive_key, encrypt_content, decrypt_content, generate_s
 from core.keychain import (
     get_master_password, set_master_password,
     get_api_token, get_huper_url,
-    ensure_config_dir,
+    ensure_config_dir, CONFIG_PATH,
 )
 from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules, get_config, set_config
 from core.session import get_current_session_key, build_session_summary, get_recent_files
@@ -143,8 +143,6 @@ def _get_topics_from_config() -> list[dict]:
     return DEFAULT_TOPICS
 
 
-_EMBED_MODEL = None
-
 
 def _get_embed_model():
     """懒加载向量模型（all-MiniLM-L6-v2）."""
@@ -254,7 +252,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="0.8.9")
+app = FastAPI(title="Amber Hunter", version="0.9.3")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -857,7 +855,7 @@ def get_status(request: Request):
     h = add_cors_headers(request)
     return JSONResponse({
         "running": True,
-        "version": "0.8.9",
+        "version": "0.9.3",
         "session_key": session_key,
         "has_master_password": bool(master_pw),
         "has_api_token": bool(api_token),
@@ -868,12 +866,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "0.8.9", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "0.9.3", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v0.8.4 启动")
+    print("🌙 Amber-Hunter v0.9.3 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
