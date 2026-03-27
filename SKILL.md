@@ -170,6 +170,8 @@ sudo pacman -S libsecret
 ---
 
 ## Version History
+- **v0.9.5** (2026-03-28): amber-proactive V4 self-contained
+- **v0.9.5** (2026-03-28): amber-proactive V4 — fully self-contained, cron-triggered every 15min, no agent/heartbeat dependency
 - **v0.9.5** (2026-03-28): amber-proactive V4 — fully self-contained script (LLM extraction + write capsules done internally), cron-triggered every 15min, no agent/heartbeat dependency, bilingual trigger words
 - **v0.9.5** (2026-03-28): amber-proactive V3 — LLM extraction mode, no LLM call in skill, writes to pending_extract.jsonl for agent to process; bilingual triggers (中英双语); 20-message auto threshold; list_capsules content field fix
 - **v0.9.3** (2026-03-27): Fix CONFIG_PATH import, version strings unified, ensure_config_dir abs path fix, remove duplicate _EMBED_MODEL declaration
