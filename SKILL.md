@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Local memory engine for Huper琥珀
-> Version: 0.9.3 | 2026-03-27
+> Version: 0.9.4 | 2026-03-28
 
 ---
 
