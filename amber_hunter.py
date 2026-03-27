@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v0.9.4
+Amber-Hunter v0.9.5
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -252,7 +252,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="0.9.4")
+app = FastAPI(title="Amber Hunter", version="0.9.5")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -856,7 +856,7 @@ def get_status(request: Request):
     h = add_cors_headers(request)
     return JSONResponse({
         "running": True,
-        "version": "0.9.4",
+        "version": "0.9.5",
         "session_key": session_key,
         "has_master_password": bool(master_pw),
         "has_api_token": bool(api_token),
@@ -867,12 +867,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "0.9.4", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "0.9.5", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v0.9.4 启动")
+    print("🌙 Amber-Hunter v0.9.5 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

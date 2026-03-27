@@ -1,3 +1,11 @@
+## [v0.9.5] — 2026-03-28
+
+### Changed
+- **amber-proactive V4**：完全自包含脚本，LLM提取+写胶囊全部在脚本内完成，cron每15分钟直接触发，无需agent介入，无需heartbeat触发链路修复
+
+### Fixed
+- **heartbeat不触发问题**：Telegram消息不触发Mac app heartbeat，导致V3自动提取从未运行；V4彻底解决
+
 # Changelog
 
 ## [v0.9.3] — 2026-03-27
