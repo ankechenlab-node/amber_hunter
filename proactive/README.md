@@ -1,6 +1,6 @@
 ---
 name: amber-proactive
-version: 0.4.0
+version: 0.4.1
 description: "Amber proactive memory capture. Fully self-contained Node.js script — no agent dependency, cron-triggered LLM extraction. Supports bilingual triggers (Chinese + English)."
 ---
 
@@ -74,7 +74,7 @@ amber-hunter/
 
 ## 版本历史
 
-- **v0.4.0**：完全自包含，脚本内部完成 LLM 提取+写胶囊，cron 直接触发，不需要 agent
+- **v0.4.1**：完全自包含，脚本内部完成 LLM 提取+写胶囊，cron 直接触发，不需要 agent
 - **v0.3.0**：LLM extraction via agent model（实验版）
 - **v0.2.0**：Signal-based capture（已废弃）
 - **v0.1.0**：Initial
