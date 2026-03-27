@@ -110,11 +110,11 @@ def list_capsules(limit: int = 50) -> list[dict]:
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
     rows = c.execute(
-        "SELECT id,memo,tags,session_id,window_title,created_at,salt,nonce,synced "
+        "SELECT id,memo,content,tags,session_id,window_title,created_at,salt,nonce,synced "
         "FROM capsules ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
     conn.close()
-    keys = ["id","memo","tags","session_id","window_title","created_at","salt","nonce","synced"]
+    keys = ["id","memo","content","tags","session_id","window_title","created_at","salt","nonce","synced"]
     return [dict(zip(keys, r)) for r in rows]
 
 

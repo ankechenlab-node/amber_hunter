@@ -399,6 +399,7 @@ def list_capsules_handler(authorization: str = Header(None), request: Request = 
             {
                 "id": c["id"],
                 "memo": c["memo"],
+                "content": c.get("content") or "",
                 "tags": c["tags"],
                 "session_id": c["session_id"],
                 "window_title": c["window_title"],
