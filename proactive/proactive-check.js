@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * amber-proactive V4: Fully self-contained extraction
+ * amber-proactive V3.1: Zero-LLM Extraction
  * 
- * 三步全部在脚本内完成，cron 直接触发，不需要 agent 介入。
+ * 此版本回归设计初衷：skill 脚本不调用任何外部大模型。
+ * 该脚本只负责读取 session 对话并推送到 queue 中。真正的大模型提取、
+ * 胶囊写入将由 agent 在其自身的 heartbeat 流程中执行。
  * 
  * 触发方式：
- * - 自动: cron 每15分钟运行此脚本 → 检查阈值 → LLM提取 → 写胶囊
+ * - 自动: cron 每15分钟运行此脚本 → 检查阈值 → 写 pending_extract.jsonl
  * - 手动: agent 调用此脚本（任何对话量都触发）
  * 
  * 触发阈值：
@@ -16,16 +18,13 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const https = require('https');
-const http = require('http');
 
 const HOME = os.homedir();
 const SESSIONS_DIR = path.join(HOME, '.openclaw', 'agents', 'main', 'sessions');
-const PENDING_FILE = path.join(HOME, '.amber-hunter', 'pending_extract.jsonl');
-const CONFIG_PATH = path.join(HOME, '.amber-hunter', 'config.json');
-const LOG_PATH = path.join(HOME, '.amber-hunter', 'amber-proactive.log');
+const HUNTER_DIR = path.join(HOME, '.amber-hunter');
+const PENDING_FILE = path.join(HUNTER_DIR, 'pending_extract.jsonl');
+const LOG_PATH = path.join(HUNTER_DIR, 'amber-proactive.log');
 
-const AMBER_PORT = 18998;
 const MIN_MESSAGES_THRESHOLD = 20;
 
 // ── Logging ────────────────────────────────────────────────────────────
@@ -34,70 +33,6 @@ function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
   fs.appendFileSync(LOG_PATH, `[${ts}] ${msg}\n`);
   console.log(`[${ts}] ${msg}`);
-}
-
-// ── Config ────────────────────────────────────────────────────────────
-
-function getConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  } catch { return {}; }
-}
-
-function getApiKey() {
-  const cfg = getConfig();
-  return cfg.api_key || cfg.apiToken || '';
-}
-
-// ── MiniMax LLM Call ─────────────────────────────────────────────────
-
-function callMinimaxLLM(prompt, apiKey) {
-  return new Promise((resolve, reject) => {
-    const bodyStr = JSON.stringify({
-      model: 'minimax-cn/MiniMax-M2.1-flash',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const url = new URL('https://api.minimaxi.com/anthropic/v1/messages');
-    const opts = {
-      hostname: url.hostname,
-      port: url.port || 443,
-      path: url.pathname,
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-        'Content-Length': Buffer.byteLength(bodyStr),
-      },
-    };
-
-    const req = https.request(opts, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          const items = parsed.content || [];
-          let text = '';
-          for (const item of items) {
-            if (item.type === 'text') { text = item.text; break; }
-          }
-          // 去掉可能的markdown包裹
-          text = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-          const result = JSON.parse(text);
-          resolve(result.facts || []);
-        } catch (e) {
-          log(`[llm] Parse error: ${e.message}, raw: ${data.slice(0, 100)}`);
-          resolve([]); // 失败不阻断
-        }
-      });
-    });
-    req.on('error', e => { log(`[llm] API error: ${e.message}`); resolve([]); });
-    req.write(bodyStr);
-    req.end();
-  });
 }
 
 // ── Session Reading ────────────────────────────────────────────────────
@@ -150,41 +85,26 @@ function buildConversationText(messages, maxChars = 8000) {
   return text.length > maxChars ? text.slice(-maxChars) : text;
 }
 
-// ── Amber API ────────────────────────────────────────────────────────
+// ── Queue Management ────────────────────────────────────────────────ـــ
 
-function writeCapsule(token, memo, content, tags) {
-  return new Promise(resolve => {
-    const capsule = { memo: memo.slice(0, 60), content, tags };
-    const bodyStr = JSON.stringify(capsule);
-    const opts = {
-      hostname: 'localhost', port: AMBER_PORT, path: '/capsules',
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(bodyStr),
-      },
-    };
-    const req = http.request(opts, res => {
-      res.resume();
-      resolve(res.statusCode === 200 || res.statusCode === 201);
-    });
-    req.on('error', () => resolve(false));
-    req.write(bodyStr);
-    req.end();
-  });
+function writePendingExtract(sessionId, messageCount, conversation) {
+  if (!fs.existsSync(HUNTER_DIR)) {
+    fs.mkdirSync(HUNTER_DIR, { recursive: true });
+  }
+  const payload = {
+    session_id: sessionId,
+    message_count: messageCount,
+    created_at: Math.floor(Date.now() / 1000),
+    conversation: conversation
+  };
+  fs.appendFileSync(PENDING_FILE, JSON.stringify(payload) + '\n');
+  log(`[queue] Wrote session ${sessionId} (${messageCount} msgs) to pending_extract.jsonl`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
 
 async function main() {
   const isManual = process.argv.includes('--manual');
-  const apiKey = getApiKey();
-
-  if (!apiKey) {
-    log('[main] No API key found in config, skipping');
-    return;
-  }
 
   const sessionPath = getLatestSession();
   if (!sessionPath) {
@@ -218,38 +138,9 @@ async function main() {
   }
 
   const conversation = buildConversationText(messages);
-
-  // 构建提取 prompt
-  const prompt = `从以下对话中提取关键事实。只返回纯JSON，不要markdown，不要思考过程。
-
-对话：
-${conversation}
-
-输出格式：
-{"facts": [{"fact": "具体描述这个事实", "worth": true}]}`;
-
-  log(`[llm] Calling MiniMax API...`);
-  const facts = await callMinimaxLLM(prompt, apiKey);
-
-  if (!facts || facts.length === 0) {
-    log('[llm] No facts extracted, skipping');
-    return;
-  }
-
-  const worthIt = facts.filter(f => f.worth);
-  log(`[llm] Extracted ${facts.length} facts, ${worthIt.length} worth saving`);
-
-  const token = getApiKey();
-  let written = 0;
-
-  for (const { fact, worth } of facts) {
-    if (!worth) continue;
-    const ok = await writeCapsule(token, fact, fact, 'auto-extract');
-    if (ok) written++;
-    log(`[capsule] ${ok ? '✅' : '❌'} ${fact.slice(0, 50)}`);
-  }
-
-  log(`[done] Wrote ${written}/${worthIt.length} capsules from ${messages.length} messages`);
+  
+  // V3.1: 将大模型提取延缓给 agent，不在此执行
+  writePendingExtract(sessionId, messages.length, conversation);
 }
 
 main().catch(e => log('[error] ' + e.message));
