@@ -755,7 +755,7 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
                 "session_id":    capsule.get("session_id"),
             }
 
-            with httpx.Client(timeout=15.0) as client:
+            with httpx.Client(timeout=15.0, trust_env=False) as client:
                 resp = client.post(
                     f"{huper_url}/capsules",
                     json=payload,
@@ -811,6 +811,27 @@ def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = 
 
 # ── master_password 设置（Dashboard 用）────────────────
 from pydantic import BaseModel
+class BindApiKeyIn(BaseModel):
+    api_key: str
+
+@app.post("/bind-apikey")
+def bind_apikey_handler(payload: BindApiKeyIn, request: Request):
+    """更新 Huper 云端 API Key（仅限本机请求）"""
+    client = request.client
+    if client and client.host not in ("127.0.0.1", "::1", "localhost"):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    try:
+        import json as _json
+        cfg = {}
+        if CONFIG_PATH.exists():
+            cfg = _json.loads(CONFIG_PATH.read_text())
+        cfg["api_key"] = payload.api_key
+        CONFIG_PATH.parent.mkdir(exist_ok=True)
+        CONFIG_PATH.write_text(_json.dumps(cfg, indent=2))
+        return JSONResponse({"ok": True}, headers=add_cors_headers(request))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500, headers=add_cors_headers(request))
+
 class MasterPasswordIn(BaseModel):
     password: str
 

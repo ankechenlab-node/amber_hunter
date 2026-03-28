@@ -50,6 +50,7 @@ Amber-Hunter is the **capture layer** of Huper琥珀 — free, open-source, and 
 | `/sync` | GET | Bearer or ?token= | Cloud sync (requires account) |
 | `/config` | GET/POST | Bearer or ?token= | Read/set config (incl. auto_sync) |
 | `/master-password` | POST | localhost | Set master_password |
+| `/bind-apikey` | POST | localhost | Update Huper cloud API key in config.json |
 
 ---
 
@@ -170,6 +171,8 @@ sudo pacman -S libsecret
 ---
 
 ## Version History
+- **v0.9.6** (2026-03-28): Add `/bind-apikey` endpoint (localhost-only) — dashboard can now auto-push newly generated Huper API key to amber-hunter config.json; dashboard retry-on-401 token refresh logic; sync AbortSignal timeout raised to 120s.
+- **v0.9.5** (2026-03-28): amber-proactive V4 — fully self-contained cron script, LLM extraction + capsule write all in-script; no heartbeat dependency; cron every 15 min.
 - **v1.0.0** (2026-03-28): amber-proactive V3.1 — Zero-LLM script; extraction task is queued to pending_extract.jsonl and executed by Agent heartbeat.
 - **v0.9.3** (2026-03-27): Fix CONFIG_PATH import, version strings unified, ensure_config_dir abs path fix, remove duplicate _EMBED_MODEL declaration
 - **v0.9.2** (2026-03-26): Fix semantic search — add sentence-transformers + numpy to requirements; remove unused mac-keychain

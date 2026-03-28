@@ -1,3 +1,14 @@
+## [v0.9.6] — 2026-03-28
+
+### Added
+- **`POST /bind-apikey`** (localhost-only) — dashboard 生成新 API Key 后自动调用，将 `api_key` 写入 `~/.amber-hunter/config.json`，解决 api_key 不一致导致同步超时的问题
+
+### Changed
+- **dashboard sync timeout** — `AbortSignal.timeout` 从 30000ms 提升到 120000ms，支持 30+ 条未同步胶囊的批量同步（约 1.3s/条）
+- **dashboard 401 自动重试** — `checkHunterStatus()`、`triggerSync()`、`loadSyncStatus()` 均加入 token 过期自动刷新 + 重试逻辑
+
+---
+
 ## [v0.9.5] — 2026-03-28
 
 ### Changed
