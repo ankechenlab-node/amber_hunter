@@ -16,6 +16,7 @@ from core.keychain import (
     get_master_password, set_master_password,
     get_api_token, get_huper_url,
     ensure_config_dir, CONFIG_PATH,
+    get_os, is_headless,
 )
 from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules, get_config, set_config
 from core.session import get_current_session_key, build_session_summary, get_recent_files
@@ -877,7 +878,9 @@ def get_status(request: Request):
     h = add_cors_headers(request)
     return JSONResponse({
         "running": True,
-        "version": "0.9.6",
+        "version": "1.0.0",
+        "platform": get_os(),
+        "headless": is_headless(),
         "session_key": session_key,
         "has_master_password": bool(master_pw),
         "has_api_token": bool(api_token),
@@ -888,12 +891,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "0.9.6", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.0.0", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v0.9.6 启动")
+    print("🌙 Amber-Hunter v1.0.0 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

@@ -113,7 +113,50 @@ def _windows_set(account: str, password: str) -> bool:
 
 
 # ── Linux ────────────────────────────────────────────────
+def _linux_is_headless() -> bool:
+    """检测当前 Linux 是否为无桌面环境（VPS / headless server）。
+    判断依据：无 DISPLAY/WAYLAND_DISPLAY 环境变量，或 secret-tool 不可用。
+    """
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    has_dbus = bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
+    has_secret_tool = False
+    try:
+        r = subprocess.run(["which", "secret-tool"], capture_output=True, timeout=2)
+        has_secret_tool = r.returncode == 0
+    except Exception:
+        pass
+    return not (has_display and has_dbus and has_secret_tool)
+
+
+def _linux_config_get(account: str) -> str | None:
+    """从 config.json 读取凭据（headless 降级路径）"""
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            return cfg.get(account) or None
+        except Exception:
+            pass
+    return None
+
+
+def _linux_config_set(account: str, password: str) -> bool:
+    """将凭据写入 config.json（headless 降级路径，明文存储，用户知情）"""
+    try:
+        cfg = {}
+        if CONFIG_PATH.exists():
+            cfg = json.loads(CONFIG_PATH.read_text())
+        cfg[account] = password
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        return True
+    except Exception:
+        return False
+
+
 def _linux_get(account: str) -> str | None:
+    # headless 环境（VPS）：直接从 config.json 读取
+    if _linux_is_headless():
+        return _linux_config_get(account)
     try:
         r = subprocess.run(
             ["secret-tool", "lookup", "amber-hunter", account],
@@ -125,9 +168,12 @@ def _linux_get(account: str) -> str | None:
 
 
 def _linux_set(account: str, password: str) -> bool:
+    # headless 环境（VPS）：写入 config.json（明文，用户知情）
+    if _linux_is_headless():
+        return _linux_config_set(account, password)
     try:
         r1 = subprocess.run(
-            ["secret-tool", "store", "--label=f\"Amber Hunter {account}\"",
+            ["secret-tool", "store", f"--label=Amber Hunter {account}",
              "amber-hunter", account],
             input=password, capture_output=True, timeout=3, text=True
         )
@@ -161,8 +207,10 @@ def _credential_set(account: str, password: str) -> bool:
 def get_master_password() -> str | None:
     """
     获取 master_password。
-    macOS/Linux: 从系统密钥链读取。
-    Windows: cmdkey 无法读回密码，fallback 到 config.json（明文，用户知情）。
+    macOS:           从 Keychain（security CLI）读取。
+    Linux（桌面）:   从 GNOME Keyring（secret-tool）读取。
+    Linux（headless）: 从 config.json 读取（_linux_get 内部自动降级）。
+    Windows:         cmdkey 无法读回密码，fallback 到 config.json（明文，用户知情）。
     """
     pw = _credential_get("master_password")
     if pw:
@@ -224,3 +272,12 @@ def ensure_config_dir():
 def get_os() -> str:
     """返回当前操作系统名称"""
     return OS
+
+
+def is_headless() -> bool:
+    """检测当前环境是否为无桌面 headless 环境。
+    Linux headless（VPS）返回 True；macOS/Windows 始终返回 False。
+    """
+    if OS == "linux":
+        return _linux_is_headless()
+    return False

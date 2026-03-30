@@ -1,3 +1,15 @@
+## [v1.0.0] — 2026-03-30
+
+### Added
+- **VPS / headless Linux 支持** — `core/keychain.py` 新增 `_linux_is_headless()` 检测；无 DISPLAY/WAYLAND_DISPLAY/secret-tool 环境自动降级到 `config.json` 存储凭据，VPS 部署无需 GNOME Keyring
+- **平台感知 `/status`** — 返回 `platform`（macos/linux/windows）和 `headless`（bool）字段，方便客户端检测运行环境
+- **公开 `is_headless()` API** — `core/keychain.py` 导出 `is_headless()`，可供上层模块判断环境
+
+### Changed
+- **正式版本** — amber-hunter 进入 v1.0 里程碑，支持 macOS / Windows / Linux 桌面 / Linux headless(VPS) 全平台
+
+---
+
 ## [v0.9.6] — 2026-03-28
 
 ### Added
