@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v0.9.6
+Amber-Hunter v1.1.9
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
 """
 
-import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc
+import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc, threading, logging
 from pathlib import Path
 
 # ── 核心模块 ────────────────────────────────────────────
@@ -18,7 +18,9 @@ from core.keychain import (
     ensure_config_dir, CONFIG_PATH,
     get_os, is_headless,
 )
-from core.db import init_db, insert_capsule, get_capsule, list_capsules, mark_synced, get_unsynced_capsules, get_config, set_config
+from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_synced,
+    get_unsynced_capsules, get_config, set_config,
+    queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 
@@ -265,6 +267,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Private Network Access middleware ──────────────────
+# Chrome 要求 HTTPS 页面访问 localhost 时，服务端必须在 OPTIONS 预检及实际响应中
+# 返回 Access-Control-Allow-Private-Network: true，否则请求被浏览器直接拦截。
+@app.middleware("http")
+async def private_network_access_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 # ── 认证 ────────────────────────────────────────────────
 def verify_token(authorization: str = Header(None)) -> bool:
     """验证本地 API token，防同一机器上其他进程滥用"""
@@ -284,11 +295,13 @@ ALLOWED_ORIGINS = [
 ]
 
 def add_cors_headers(request: Request):
-    """手动给 Response 添加 CORS 头"""
+    """手动给 Response 添加 CORS 头（含 Private Network Access）"""
     origin = request.headers.get("origin", "")
+    h = {"access-control-allow-private-network": "true"}
     if origin in ALLOWED_ORIGINS:
-        return {"access-control-allow-origin": origin, "access-control-allow-credentials": "true"}
-    return {}
+        h["access-control-allow-origin"] = origin
+        h["access-control-allow-credentials"] = "true"
+    return h
 
 # ── Topic 分类接口（无认证，供 amber-proactive 调用）─────
 @app.get("/classify")
@@ -349,6 +362,8 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
         prefill = f"{prefill}\n\n相关文件：{file_names}" if prefill else file_names
 
     h = add_cors_headers(request)
+    # 如果用户开启了 auto_sync，freeze 时自动触发后台同步
+    _spawn_sync_if_enabled()
     return JSONResponse({
         "session_key": session_key,
         "prefill": prefill[:500],
@@ -455,6 +470,8 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), reques
         nonce=nonce_b64,
         encrypted_len=len(ct_b64) if ct_b64 else 0,
         content_hash=content_hash,
+        source_type=getattr(capsule, 'source_type', 'manual'),
+        category=getattr(capsule, 'category', '') or _infer_category(capsule.memo or ""),
     )
 
     h = add_cors_headers(request) if request else {}
@@ -683,6 +700,315 @@ def _semantic_available() -> bool:
 
 
 # ── 云端同步（需认证）────────────────────────────────
+
+
+# ── 分类推断 helper（v1.1.9）─────────────────────────────
+_CATEGORY_KEYWORDS = {
+    "thought":    ["想法", "想到", "突然想", "有个念头", "脑海中", "感觉", "觉得", "意识到",
+                   "realize", "just thought", "idea", "thought", "occurred to me"],
+    "learning":   ["读了", "看了", "书里", "文章", "这本书", "学到", "理解了", "课程",
+                   "reading", "book", "learned", "course", "study"],
+    "decision":   ["决定", "选择了", "打算", "确定了", "我们选", "不再", "放弃", "要去", "方案",
+                   "decided", "going with", "we chose", "commit to", "will"],
+    "reflection": ["反思", "复盘", "回顾", "总结", "想清楚", "发现自己",
+                   "reviewed", "reflecting", "looking back", "in retrospect", "realized", "lesson"],
+    "people":     ["和.{1,8}聊", "跟.{1,8}说", "和朋友", "跟朋友", "和同事", "跟同事",
+                   "聊了", "聊天", "见了", "对话", "和他", "和她",
+                   "talked to", "met with", "conversation with", "catchup", "friend"],
+    "life":       ["心情", "情绪", "感受", "低落", "开心", "难过", "疲惫", "疲倦", "焦虑",
+                   "运动", "睡眠", "跑步", "冥想", "饮食", "健身", "休息",
+                   "sleep", "exercise", "workout", "meditation", "health", "mood", "feeling", "tired"],
+    "creative":   ["灵感", "创意", "设计", "想做", "想象", "写作", "作品",
+                   "inspiration", "design idea", "creative", "writing"],
+    "dev":        ["python", "javascript", "git", "docker", "api", "sql",
+                   "error", "bug", "code", "deploy", "server", "代码", "报错", "修复", "接口", "部署"],
+}
+
+import re as _re
+
+def _infer_category(text: str) -> str:
+    """从文本推断大类，返回 category 字符串"""
+    t = text.lower()
+    scores = {}
+    for cat, kws in _CATEGORY_KEYWORDS.items():
+        score = 0
+        for kw in kws:
+            try:
+                score += len(_re.findall(kw, t))
+            except Exception:
+                score += t.count(kw)
+        if score > 0:
+            scores[cat] = score
+    if not scores:
+        return ""
+    return max(scores, key=scores.get)
+
+
+# ── /ingest 端点（v1.1.9）─────────────────────────────────
+class IngestIn(BaseModel):
+    memo: str
+    context: str = ""
+    category: str = ""
+    tags: str = ""
+    source: str = "unknown"
+    confidence: float = 0.7
+    review_required: bool = True
+
+
+@app.post("/ingest")
+def ingest_memory(body: IngestIn, request: Request = None,
+                  authorization: str = Header(None)):
+    """
+    AI 主动写入记忆端点（v1.1.9）。
+    - review_required=False 且 confidence>=0.95 → 直接写入 capsules
+    - 其余 → 写入 memory_queue 等待用户审核
+    支持 Bearer header 或 ?token= query param。
+    """
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+
+    h = add_cors_headers(request) if request else {}
+
+    # 推断缺失的 category
+    category = body.category or _infer_category(body.memo + " " + body.context)
+
+    # 高置信度直接写入
+    if not body.review_required and body.confidence >= 0.95:
+        cap_id = secrets.token_hex(8)
+        insert_capsule(
+            capsule_id=cap_id,
+            memo=body.memo,
+            content="",
+            tags=body.tags,
+            session_id=None,
+            window_title=None,
+            url=None,
+            created_at=time.time(),
+            source_type="ai_chat",
+            category=category,
+        )
+        return JSONResponse({"queued": False, "capsule_id": cap_id,
+                             "message": "Saved directly"}, headers=h)
+
+    # 其余进审核队列
+    qid = queue_insert(
+        memo=body.memo,
+        context=body.context,
+        category=category,
+        tags=body.tags,
+        source=body.source,
+        confidence=body.confidence,
+    )
+    return JSONResponse({"queued": True, "queue_id": qid,
+                         "message": "Added to review queue"}, headers=h)
+
+
+# ── /queue 端点（v1.1.9）─────────────────────────────────
+
+@app.get("/queue")
+def get_queue(request: Request = None, authorization: str = Header(None)):
+    """列出待审核记忆"""
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+    pending = queue_list_pending()
+    return JSONResponse({"pending": pending, "count": len(pending)}, headers=h)
+
+
+class QueueEditIn(BaseModel):
+    memo: str = ""
+    category: str = ""
+    tags: str = ""
+
+
+@app.post("/queue/{qid}/approve")
+def approve_queue_item(qid: str, request: Request = None,
+                       authorization: str = Header(None)):
+    """接受待审核记忆 → 写入 capsules"""
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+
+    item = queue_get(qid)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404, headers=h)
+    if item["status"] != "pending":
+        return JSONResponse({"error": "already processed"}, status_code=400, headers=h)
+
+    cap_id = secrets.token_hex(8)
+    insert_capsule(
+        capsule_id=cap_id,
+        memo=item["memo"],
+        content="",
+        tags=item["tags"],
+        session_id=None,
+        window_title=None,
+        url=None,
+        created_at=time.time(),
+        source_type="ai_chat",
+        category=item["category"],
+    )
+    queue_set_status(qid, "approved")
+    return JSONResponse({"capsule_id": cap_id, "message": "Approved and saved"}, headers=h)
+
+
+@app.post("/queue/{qid}/reject")
+def reject_queue_item(qid: str, request: Request = None,
+                      authorization: str = Header(None)):
+    """忽略待审核记忆"""
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+
+    item = queue_get(qid)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404, headers=h)
+    queue_set_status(qid, "rejected")
+    return JSONResponse({"message": "Rejected"}, headers=h)
+
+
+@app.post("/queue/{qid}/edit")
+def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
+                    authorization: str = Header(None)):
+    """编辑后接受待审核记忆"""
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+
+    item = queue_get(qid)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404, headers=h)
+
+    final_memo = body.memo or item["memo"]
+    final_category = body.category or item["category"]
+    final_tags = body.tags or item["tags"]
+
+    queue_update(qid, final_memo, final_category, final_tags)
+    cap_id = secrets.token_hex(8)
+    insert_capsule(
+        capsule_id=cap_id,
+        memo=final_memo,
+        content="",
+        tags=final_tags,
+        session_id=None,
+        window_title=None,
+        url=None,
+        created_at=time.time(),
+        source_type="ai_chat",
+        category=final_category,
+    )
+    return JSONResponse({"capsule_id": cap_id, "message": "Edited and saved"}, headers=h)
+
+
+# ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
+def _background_sync() -> dict:
+    """
+    无 HTTP 上下文的同步实现，可安全在后台线程调用。
+    返回 {"synced": int, "total": int, "errors": list}
+    """
+    try:
+        import httpx
+        api_token = get_api_token()
+        huper_url = get_huper_url() or "https://huper.org/api"
+        master_pw = get_master_password()
+        if not master_pw:
+            logging.warning("[amber-hunter] auto-sync: master_password not set, skip")
+            return {"synced": 0, "total": 0, "errors": ["master_password not set"]}
+
+        unsynced = get_unsynced_capsules()
+        if not unsynced:
+            return {"synced": 0, "total": 0, "errors": []}
+
+        synced_count = 0
+        errors = []
+
+        for capsule in unsynced:
+            try:
+                salt_b64 = capsule.get("salt")
+                if not salt_b64:
+                    errors.append({"id": capsule["id"], "error": "no salt"})
+                    continue
+
+                salt = base64.b64decode(salt_b64)
+                key  = derive_key(master_pw, salt)
+
+                content_enc   = capsule.get("content") or ""
+                content_nonce = capsule.get("nonce")   or ""
+
+                memo = (capsule.get("memo") or "").encode("utf-8")
+                memo_ct, memo_nonce = encrypt_content(memo, key)
+                memo_enc       = base64.b64encode(memo_ct).decode()
+                memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
+
+                tags = (capsule.get("tags") or "").encode("utf-8")
+                tags_ct, tags_nonce = encrypt_content(tags, key)
+                tags_enc       = base64.b64encode(tags_ct).decode()
+                tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
+
+                payload = {
+                    "e2e":           True,
+                    "salt":          salt_b64,
+                    "memo_enc":      memo_enc,
+                    "memo_nonce":    memo_nonce_b64,
+                    "content_enc":   content_enc,
+                    "content_nonce": content_nonce,
+                    "tags_enc":      tags_enc,
+                    "tags_nonce":    tags_nonce_b64,
+                    "created_at":    capsule.get("created_at"),
+                    "session_id":    capsule.get("session_id"),
+                }
+
+                with httpx.Client(timeout=15.0, trust_env=False) as client:
+                    resp = client.post(
+                        f"{huper_url}/capsules",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {api_token}"}
+                    )
+
+                if resp.status_code in (200, 201):
+                    mark_synced(capsule["id"])
+                    synced_count += 1
+                else:
+                    errors.append({"id": capsule["id"], "status": resp.status_code})
+
+            except Exception as e:
+                errors.append({"id": capsule["id"], "error": str(e)})
+
+        logging.info(f"[amber-hunter] auto-sync done: {synced_count}/{len(unsynced)}")
+        return {"synced": synced_count, "total": len(unsynced), "errors": errors}
+
+    except Exception as e:
+        logging.error(f"[amber-hunter] _background_sync error: {e}")
+        return {"synced": 0, "total": 0, "errors": [str(e)]}
+
+
+def _spawn_sync_if_enabled():
+    """如果 auto_sync 已启用，在守护线程里执行同步（非阻塞）。"""
+    if get_config("auto_sync") == "true":
+        t = threading.Thread(target=_background_sync, daemon=True)
+        t.start()
+
+
 @app.get("/sync")
 def sync_to_cloud(request: Request, authorization: str = Header(None)):
     """
@@ -878,7 +1204,7 @@ def get_status(request: Request):
     h = add_cors_headers(request)
     return JSONResponse({
         "running": True,
-        "version": "1.0.0",
+        "version": "1.1.9",
         "platform": get_os(),
         "headless": is_headless(),
         "session_key": session_key,
@@ -891,18 +1217,26 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.0.0", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.1.9", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.0.0 启动")
+    print("🌙 Amber-Hunter v1.1.9 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
     print(f"   API:        http://localhost:18998/")
     print(f"   CORS:       https://huper.org + localhost")
     print(f"   认证:       本地 API token")
+    # 启动 30 分钟定时同步守护线程
+    def _periodic_sync_loop():
+        while True:
+            time.sleep(30 * 60)          # 先休眠再执行，避免启动时立即同步
+            _spawn_sync_if_enabled()
+    t = threading.Thread(target=_periodic_sync_loop, daemon=True, name="amber-periodic-sync")
+    t.start()
+
     uvicorn.run(app, host="127.0.0.1", port=18998, log_level="warning")
 
 if __name__ == "__main__":
