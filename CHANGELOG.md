@@ -1,3 +1,42 @@
+## [v1.2.0] — 2026-03-31
+
+### Added
+- **`core/llm.py`** — LLM provider abstraction layer; MiniMax / OpenAI / Local (Ollama) unified interface; `get_llm()` factory, `complete()` text, `complete_json()` JSON; auto-detects API key from OpenClaw config or env
+- **`POST /rerank`** — LLM-powered re-ranking of memory candidates; accepts `{query, memories[]}`, returns memories with `relevance_score` updated by LLM judgment
+- **`GET /recall?rerank=true`** — optional LLM reranking after keyword/vector recall; non-blocking via `asyncio.to_thread`
+- **`GET /classify` LLM fallback** — keyword matching primary; LLM classification triggers when keyword results < 2 tags; retry loop handles MiniMax extended thinking (200→400 tokens)
+
+### Fixed
+- **Proactive session selection** — was selecting by mtime (cron session always newest → always skipped real sessions); now selects by message count (most messages = real active session)
+- **`.deleted.` file filtering** — proactive-check now skips session files containing `.deleted.` in filename
+- **Duplicate session enqueue** — was re-enqueuing same session on every run; now deduplicates by `session_id` (regardless of message count growth)
+- **Cron job path** — was pointing to non-existent `~/.openclaw/workspace/skills/amber-proactive/`; corrected to `~/.openclaw/skills/amber-hunter/proactive/proactive-check.js`
+
+---
+
+## [v1.1.9] — 2026-03-31
+
+### Added
+- **Universal life taxonomy** — 8 fixed categories (thought/learning/decision/reflection/people/life/creative/dev) replacing developer-only tags; 11 new life tags in TAG_META; bilingual Chinese+English auto-detection keywords
+- **`_infer_category()`** — keyword-based category auto-detection in both `amber_hunter.py` and `app.py`; bilingual coverage for everyday life phrases
+- **`POST /ingest`** (localhost) — AI-initiated memory write endpoint; `confidence≥0.95` + `review_required=false` → direct capsule; else → `memory_queue`; returns `{queued, capsule_id/queue_id, category, source_type}`
+- **`POST /api/ingest`** (cloud) — same semantics for external AI clients (ChatGPT, Claude.ai) authenticating via user JWT
+- **`memory_queue` table** (hunter.db) — stores AI-proposed memories pending user review; fields: id, memo, context, category, tags, source, confidence, created_at, status
+- **Queue management endpoints** — `GET /queue`, `POST /queue/{id}/approve`, `POST /queue/{id}/reject`, `POST /queue/{id}/edit`
+- **`source_type` + `category` DB fields** — added to both `capsules` (cloud) and local hunter.db tables; values: manual/freeze/ai_chat/ai_pending/ingest
+- **Dashboard review queue card** — "待确认记忆" card in dashboard.html with badge, approve/reject/edit/approve-all UI; loaded at init
+- **SKILL.md multi-client guide** — complete rewrite covering 8 categories, judgment rules, /ingest + /queue docs, openclaw/Claude Code/Cowork/ChatGPT usage patterns, platform matrix
+
+### Changed
+- Version bumped: `amber_hunter.py`, `/status`, root endpoint all → `1.1.9`
+- `_CATEGORY_KEYWORDS` expanded: `thought` (想法/有个念头), `people` (聊了/聊天/和朋友), `life` (心情/情绪/低落/焦虑) — life phrases now correctly auto-categorized
+
+### Fixed
+- `api_ingest()` function signature: was incorrectly accepting `user_id` param; now uses `g.user_id` consistent with all other `@require_auth` routes
+- `broadcast_event()` call in `/api/ingest`: was referencing non-existent `_push_sse()`
+
+---
+
 ## [v1.0.0] — 2026-03-30
 
 ### Added

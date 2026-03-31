@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.1.9 | 2026-03-31
+> Version: 1.2.0 | 2026-03-31
 
 ---
 
@@ -105,7 +105,8 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 | `/status` | GET | none | Service health |
 | `/memories` | GET | none (localhost) | Local memory snapshot |
 | `/token` | GET | localhost only | Get local API key |
-| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3`) |
+| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3&rerank=true` for LLM reranking) |
+| `/rerank` | POST | Bearer / ?token= | Re-rank memory candidates with LLM — POST body: `{query, memories}` |
 | `/freeze` | GET/POST | Bearer / ?token= | Capture current dev session context |
 | `/capsules` | GET | Bearer | List local capsules |
 | `/capsules` | POST | Bearer | Create capsule manually |
@@ -220,6 +221,41 @@ GPT Action OpenAPI spec: see `tasks/gpt-action-schema.yaml` in the amber-site re
 
 ---
 
+## LLM Provider Abstraction (v1.2.0)
+
+amber-hunter uses a unified LLM interface — configure the provider once, all LLM-powered features use it.
+
+### Supported Providers
+
+| Provider | Config key | Notes |
+|---------|-----------|-------|
+| **MiniMax** | `minimax` | Default; reads from `~/.openclaw/openclaw.json` → `models.providers.minimax-cn.apiKey` |
+| **OpenAI** | `openai` | Set `api_key` and `base_url` in `~/.amber-hunter/config.json` → `llm` |
+| **Local (Ollama/LM Studio)** | `local` | Set `base_url` to your local server URL |
+
+### Config Location
+
+```json
+// ~/.amber-hunter/config.json
+{
+  "llm": {
+    "provider": "minimax",
+    "model": "MiniMax-M2.7-highspeed",
+    "api_key": "sk-cp-...",
+    "base_url": "https://api.minimaxi.com/anthropic/v1/messages"
+  }
+}
+```
+
+For MiniMax, amber-hunter auto-detects the API key from:
+1. `MINIMAX_API_KEY` env var
+2. `~/.openclaw/openclaw.json` → `models.providers.minimax-cn.apiKey`
+3. Legacy `~/.amber-hunter/config.json` → root-level `api_key` (if it looks like an LLM key)
+
+LLM-powered features: `/classify` (LLM fallback), `/rerank` (LLM reordering), proactive extraction.
+
+---
+
 ## Platform Support
 
 | Platform | Auto-start | Keychain | /ingest | /api/ingest |
@@ -282,6 +318,7 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ## Version History
 
+- **v1.2.0** (2026-03-31): **LLM abstraction layer** (`core/llm.py`) — unified interface for MiniMax/OpenAI/Local; auto-detects API key from OpenClaw config. **`/classify` LLM fallback** — keyword matching primary, LLM triggers when results insufficient. **`/rerank` endpoint** — LLM re-ranks recall candidates with relevance scores. **Proactive capture fixes** — session selection by message count (not mtime), filters `.deleted.` files, deduplicates by session_id. Cron path corrected to `~/.openclaw/skills/amber-hunter/proactive/`.
 - **v1.1.9** (2026-03-31): Universal memory taxonomy (8 life categories + tags); `/ingest` endpoint for AI-initiated writes; `memory_queue` table + approve/reject/edit flow; `source_type` + `category` DB fields; dashboard review queue card; ChatGPT GPT Action schema; SKILL.md multi-client guide; `_background_sync()` + 30min periodic scheduler; Private Network Access CORS headers.
 - **v0.9.6** (2026-03-28): `/bind-apikey` localhost endpoint; dashboard retry-on-401 token refresh; sync timeout 120s.
 - **v0.9.5** (2026-03-28): amber-proactive V4 — self-contained cron, LLM extraction, 15min interval.

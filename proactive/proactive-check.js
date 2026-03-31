@@ -37,19 +37,43 @@ function log(msg) {
 
 // ── Session Reading ────────────────────────────────────────────────────
 
-function getLatestSession() {
+/**
+ * Pick the session most likely to be the user's active conversation.
+ *
+ * Strategy: choose the session with the most messages.
+ * This is more robust than mtime-based selection, because:
+ * - Cron-triggered sessions typically have 1 message (just the cron trigger)
+ * - Active user sessions have dozens-hundreds of messages
+ * - A large session that's been idle for 30 min is still more worth capturing
+ *   than a 1-message session created 1 second ago.
+ */
+function getActiveSession() {
   try {
     const files = fs.readdirSync(SESSIONS_DIR)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({
-        name: f,
-        mtime: fs.statSync(path.join(SESSIONS_DIR, f)).mtime.getTime()
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return files[0] ? path.join(SESSIONS_DIR, files[0].name) : null;
+      .filter(f => f.endsWith('.jsonl') && !f.includes('.deleted.'))
+      .map(f => {
+        const fp = path.join(SESSIONS_DIR, f);
+        const content = fs.readFileSync(fp, 'utf8');
+        const lines = content.split('\n').filter(l => l.trim());
+        let msgCount = 0;
+        for (const line of lines) {
+          try {
+            const d = JSON.parse(line);
+            if (d.type === 'message') msgCount++;
+          } catch {}
+        }
+        return { name: f, path: fp, msgCount };
+      })
+      .filter(f => f.msgCount > 0)
+      .sort((a, b) => b.msgCount - a.msgCount);
+    return files[0] ? { path: files[0].path, id: path.basename(files[0].name, '.jsonl'), msgCount: files[0].msgCount } : null;
   } catch { return null; }
 }
 
+/**
+ * Read messages from a session file.
+ * Returns array of { role, text } objects.
+ */
 function extractMessages(sessionPath) {
   try {
     const content = fs.readFileSync(sessionPath, 'utf8');
@@ -106,16 +130,16 @@ function writePendingExtract(sessionId, messageCount, conversation) {
 async function main() {
   const isManual = process.argv.includes('--manual');
 
-  const sessionPath = getLatestSession();
-  if (!sessionPath) {
+  const session = getActiveSession();
+  if (!session) {
     log('[main] No session file found');
     return;
   }
 
-  const sessionId = path.basename(sessionPath, '.jsonl');
+  const { path: sessionPath, id: sessionId, msgCount } = session;
   const messages = extractMessages(sessionPath);
 
-  log(`[main] Session ${sessionId}: ${messages.length} messages`);
+  log(`[main] Session ${sessionId}: ${messages.length} messages (file has ~${msgCount})`);
 
   // 检查阈值
   if (!isManual && messages.length < MIN_MESSAGES_THRESHOLD) {
@@ -123,14 +147,14 @@ async function main() {
     return;
   }
 
-  // 去重：当前 session 已在 pending_extract.jsonl 且消息数未增加则跳过
+  // 去重：当前 session 已存在于 pending_extract.jsonl 则跳过（避免重复捕获）
   if (fs.existsSync(PENDING_FILE)) {
     const lines = fs.readFileSync(PENDING_FILE, 'utf8').split('\n').filter(l => l.trim());
     for (const line of lines) {
       try {
         const item = JSON.parse(line);
-        if (item.session_id === sessionId && item.message_count === messages.length) {
-          log(`[main] Session ${sessionId} already queued with same message count, skipping`);
+        if (item.session_id === sessionId) {
+          log(`[main] Session ${sessionId} already in queue, skipping`);
           return;
         }
       } catch {}

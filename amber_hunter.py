@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.1.9
+Amber-Hunter v1.2.0
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -23,6 +23,7 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_s
     queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
+from core.llm import get_llm, LLM_AVAILABLE as LLM_READY
 
 # ── FastAPI ─────────────────────────────────────────────
 import uvicorn
@@ -171,6 +172,46 @@ def _cosine_sim(a: list, b: list) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _classify_llm(text: str) -> str:
+    """LLM-powered topic classification (v1.2.0).
+
+    Uses MiniMax with extended thinking. May need retry with higher tokens
+    if thinking consumes all allocated output tokens.
+    """
+    if not LLM_READY:
+        return ""
+    try:
+        llm = get_llm()
+        if not llm.config.api_key:
+            return ""
+        prompt = (
+            "You are a topic classifier. Given a text in Chinese or English, return 1-3 comma-separated topic tags.\n"
+            "Valid tags: 工作,技术,学习,创意,偏好,健康,财务,生活,旅行,家庭,社交,娱乐,灵感,决策,情绪\n"
+            "Return ONLY the comma-separated tags on a single line, no explanation.\n"
+            "If the text is ambiguous or too short, respond with a single hyphen (-).\n\n"
+            f"Text: {text[:500]}\nTags:"
+        )
+        # Try with 200 tokens first; if no text block appears, retry with 400
+        for max_t in (200, 400):
+            result = llm.complete(prompt, max_tokens=max_t)
+            if result.startswith("[ERROR"):
+                return ""
+            first_line = result.strip().split("\n")[0].strip()
+            if first_line and first_line != "-":
+                tags = [t.strip() for t in first_line.split(",") if t.strip()]
+                seen = set()
+                cleaned = []
+                for t in tags:
+                    if t and len(t) <= 6 and " " not in t and t not in seen:
+                        seen.add(t)
+                        cleaned.append(t)
+                if cleaned:
+                    return ",".join(cleaned[:3])
+        return ""
+    except Exception:
+        return ""
+
+
 def classify_topics(text: str, existing_tags: str = "") -> str:
     """
     v0.8.9: 可扩展 topic 分类。
@@ -306,11 +347,25 @@ def add_cors_headers(request: Request):
 # ── Topic 分类接口（无认证，供 amber-proactive 调用）─────
 @app.get("/classify")
 def api_classify(request: Request, text: str = ""):
-    """对一段文本进行 topic 分类，返回逗号分隔的标签字符串."""
+    """对一段文本进行 topic 分类，返回逗号分隔的标签字符串.
+
+    策略：
+    1. 关键词匹配（所有用户可用，无网络依赖）
+    2. LLM 分类（关键词匹配为空时触发，需要配置 LLM API key）
+    """
     headers = add_cors_headers(request)
     if not text or len(text.strip()) < 5:
         return JSONResponse({"topics": ""}, headers=headers)
     topics = classify_topics(text)
+    # Fallback to LLM if keyword matching returned little
+    if not topics or len(topics.split(",")) < 2:
+        topics_llm = _classify_llm(text)
+        if topics_llm:
+            # Merge without duplicates
+            existing = set(t.strip() for t in topics.split(",") if t.strip()) if topics else set()
+            new_tags = [t for t in topics_llm.split(",") if t.strip() and t.strip() not in existing]
+            all_tags = list(existing) + new_tags
+            topics = ",".join(all_tags[:5])
     return JSONResponse({"topics": topics}, headers=headers)
 
 # ── Session 读取（无认证，供前端读取）──────────────────
@@ -534,6 +589,7 @@ def recall_memories(
     q: str = "",
     limit: int = 3,
     mode: str = "auto",
+    rerank: bool = False,
     authorization: str = Header(None),
 ):
     """
@@ -544,6 +600,7 @@ def recall_memories(
       q: 搜索查询（用户当前消息）
       limit: 返回记忆数量（默认 3）
       mode: keyword | semantic | auto（默认 auto）
+      rerank: 是否用 LLM 重排序（默认 False，需要 LLM API key）
 
     返回：
       memories: 相关记忆列表，每条含 injected_prompt（注入用的提示文本）
@@ -680,6 +737,11 @@ def recall_memories(
     # 缩短解密明文在内存中的存活窗口
     del parsed_capsules
     gc.collect()
+
+    # 可选：LLM 重排序（异步，不阻塞主流程）
+    if rerank and memories:
+        memories = _rerank_memories_llm(q, memories)
+
     return JSONResponse({
         "memories": memories[:limit],
         "query": q,
@@ -687,6 +749,115 @@ def recall_memories(
         "count": len(memories),
         "semantic_available": _semantic_available(),
     }, headers=add_cors_headers(request))
+
+
+def _rerank_memories_llm(query: str, memories: list[dict]) -> list[dict]:
+    """Re-rank a list of memory candidates using LLM.
+
+    Sends the query + all memory summaries to the LLM and asks it to score
+    and reorder them by relevance to the query. Returns reordered list.
+
+    If LLM is unavailable or fails, returns the original list unchanged.
+    """
+    if not memories or not LLM_READY:
+        return memories
+
+    try:
+        llm = get_llm()
+        if not llm.config.api_key:
+            return memories
+    except Exception:
+        return memories
+
+    # Build a compact summary of each memory for the LLM context
+    mem_lines = []
+    for i, m in enumerate(memories):
+        memo = (m.get("memo") or "").strip()
+        content = (m.get("content") or "")[:200].strip()
+        tags = (m.get("tags") or "").strip()
+        mem_lines.append(f"[{i}] [{tags}] {memo} | {content}")
+
+    mem_context = "\n".join(mem_lines)
+
+    prompt = (
+        "You are a relevance ranker. Given a user query and a list of memory entries, "
+        "score each entry 0-10 for how relevant it is to the query, then return the top entries.\n\n"
+        f"Query: {query}\n\n"
+        f"Memories:\n{mem_context}\n\n"
+        "Your task: Rate each memory [0-10] for relevance to the query, "
+        "then return the top 3-5 most relevant memories in JSON format.\n"
+        "Return STRICTLY valid JSON only, no markdown, no explanation:\n"
+        "[{\"index\": N, \"score\": S, \"reason\": \"brief reason\"}, ...]\n"
+        "Score guide: 10=directly answers query, 7-9=highly relevant, 4-6=somewhat relevant, 0-3=irrelevant."
+    )
+
+    try:
+        result = llm.complete(prompt, max_tokens=400)
+        if result.startswith("[ERROR") or not result.strip():
+            return memories
+
+        # Parse JSON response
+        import json as _json
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+
+        scores = _json.loads(cleaned)
+        if not isinstance(scores, list):
+            return memories
+
+        # Build index → score map
+        score_map = {item["index"]: item["score"] for item in scores if "index" in item}
+
+        # Reorder: scored items first (descending), then unscored
+        scored = [(score_map.get(i, 0), m) for i, m in enumerate(memories)]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Update relevance_score
+        reranked = []
+        for raw_score, m in scored:
+            m = dict(m)  # copy
+            m["relevance_score"] = round(min(raw_score / 10.0, 1.0), 2)
+            reranked.append(m)
+
+        return reranked
+
+    except Exception:
+        return memories
+
+
+@app.post("/rerank")
+async def rerank_memories(request: Request, authorization: str = Header(None)):
+    """Re-rank a list of memory candidates using LLM.
+
+    Body: {"query": "...", "memories": [...]}
+    Returns: {"memories": [...reranked...]}
+    """
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    query = body.get("query", "")
+    memories = body.get("memories", [])
+
+    if not query or not memories:
+        return JSONResponse({"memories": memories}, headers=add_cors_headers(request))
+
+    # Run LLM reranking in thread pool to avoid blocking event loop
+    import asyncio
+    reranked = await asyncio.to_thread(_rerank_memories_llm, query, memories)
+    return JSONResponse({"memories": reranked}, headers=add_cors_headers(request))
 
 
 def _semantic_available() -> bool:
@@ -1222,7 +1393,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.1.9 启动")
+    print("🌙 Amber-Hunter v1.2.0 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
