@@ -1,3 +1,10 @@
+## [v1.2.2] — 2026-04-01
+
+### Fixed
+- **Version strings** — `/status` and root `/` endpoints were returning `"1.1.9"` instead of the correct version; now aligned to `"1.2.2"`
+
+---
+
 ## [v1.2.1] — 2026-03-31
 
 ### Added
