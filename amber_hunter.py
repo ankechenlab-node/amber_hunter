@@ -1375,7 +1375,7 @@ def get_status(request: Request):
     h = add_cors_headers(request)
     return JSONResponse({
         "running": True,
-        "version": "1.1.9",
+        "version": "1.2.1",
         "platform": get_os(),
         "headless": is_headless(),
         "session_key": session_key,
@@ -1388,7 +1388,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.1.9", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.1", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
