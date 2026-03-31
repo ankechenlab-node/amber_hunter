@@ -1,4 +1,4 @@
-## [v1.2.0] — 2026-03-31
+## [v1.2.1] — 2026-03-31
 
 ### Added
 - **`core/llm.py`** — LLM provider abstraction layer; MiniMax / OpenAI / Local (Ollama) unified interface; `get_llm()` factory, `complete()` text, `complete_json()` JSON; auto-detects API key from OpenClaw config or env
