@@ -1,3 +1,13 @@
+## [v1.2.6] — 2026-04-01
+
+### Fixed
+- **proactive-check.js writeCapsule 认证错误** — `writeCapsule` 使用 MiniMax API key 作为 amber-hunter 的 Bearer token，导致 `POST /capsules` 认证失败，所有自动提取的胶囊写入 0 条；现已改为先调用 `GET /token` 获取正确的 amber-hunter token
+
+### Changed
+- **proactive-check.js 模型升级** — MiniMax 模型从 `M2.1-flash` 升级为 `M2.7-highspeed`
+
+---
+
 ## [v1.2.5] — 2026-04-01
 
 ### Fixed
