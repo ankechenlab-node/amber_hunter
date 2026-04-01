@@ -1,3 +1,17 @@
+## [v1.2.8] — 2026-04-01
+
+### Fixed
+- **proactive-check.js 内容质量：过滤日志行** — `extractMessages()` 过滤掉以 `[HH:MM:SS]` 时间戳格式和 `❌` 开头的日志行，避免 console 输出混入 session transcript，导致 LLM 提取到错误日志而非真实对话内容；修复后提取质量大幅提升
+
+---
+
+## [v1.2.7] — 2026-04-01
+
+### Fixed
+- **proactive-check.js memo 截断过短** — `memo.slice(0, 60)` 硬截60字符导致浏览琥珀时信息不足；现已改为80字符，超出部分断词加省略号
+
+---
+
 ## [v1.2.6] — 2026-04-01
 
 ### Fixed

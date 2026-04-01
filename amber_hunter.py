@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.6
+Amber-Hunter v1.2.8
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -296,7 +296,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.6")
+app = FastAPI(title="Amber Hunter", version="1.2.8")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1370,7 +1370,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.6",
+        "version":            "1.2.8",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -1387,7 +1387,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.6", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.8", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
