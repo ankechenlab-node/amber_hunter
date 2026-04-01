@@ -140,9 +140,10 @@ function extractMessages(sessionPath) {
         text = parts;
       }
       text = text.trim();
-      if (text && text.length > 10) {
-        messages.push({ role: raw.role || '?', text });
-      }
+      if (!text || text.length < 10) continue;
+      // 过滤掉日志行（时间戳格式 [HH:MM:SS] 或 ❌ 开头）
+      if (/^\[\d{2}:\d{2}:\d{2}\]/.test(text) || text.startsWith('❌')) continue;
+      messages.push({ role: raw.role || '?', text });
     }
     return messages;
   } catch { return []; }
