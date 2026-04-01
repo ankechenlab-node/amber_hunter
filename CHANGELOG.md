@@ -1,3 +1,31 @@
+## [v1.2.4] — 2026-04-01
+
+### Fixed
+- **`get_unsynced_capsules()` 字段缺失** — `core/db.py` SELECT 语句未包含 `source_type` 和 `category`，导致同步 payload 这两个字段始终为空；现已补全
+- **`httpx.Client` 在同步循环内重复创建** — 之前每上传一条胶囊就新建一个 TCP 连接；提取 `_do_sync_capsules()` helper 后改为单 Client 复用，N 条胶囊只需 1 个连接
+
+### Changed
+- **同步 payload 补全** — `_do_sync_capsules()` 新增 `source_type` 和 `category` 字段，确保云端存储与本地完全一致
+- **消除代码重复** — `_background_sync()` 和 `sync_to_cloud()` 之前各有约 80 行相同同步逻辑；统一提取到 `_do_sync_capsules()`，两处均调用该 helper
+- **`GET /capsules`** — 新增 `category`、`source_type` 字段；新增可选 `limit` 参数（1–300，默认 50）
+- **`GET /memories`** — 新增 `category`、`source_type` 字段
+- **文件头版本号** — `v1.2.2` → `v1.2.4`（之前文件头未随 v1.2.3 更新）
+
+---
+
+## [v1.2.3] — 2026-04-01
+
+### Fixed
+- **`/recall` 语义搜索 bug** — 语义向量化之前只在关键词候选（top-50）上做，导致关键词命中为 0 时语义搜索无结果；现在对全量胶囊（最多 300 条）同时做关键词 + 语义，彻底修复漏召回
+
+### Changed
+- **`/recall` hybrid 模式** — 从「关键词优先，语义补充」改为真正的加权混合：`0.4×keyword_norm + 0.6×semantic`；两路均对全量胶囊评分后合并排序
+- **`/recall` 返回字段** — 新增 `category`、`source_type`；`injected_prompt` 格式包含 category 标签；limit 候选池从 200 条扩展到 300 条
+- **`/status` 增强** — 新增字段：`capsule_count`（本地胶囊总数）、`queue_pending`（待审队列数）、`last_sync`（最近同步时间戳）、`semantic_model_loaded`（模型是否已预热）
+- **FastAPI version** — 对齐到 `1.2.3`
+
+---
+
 ## [v1.2.2] — 2026-04-01
 
 ### Fixed

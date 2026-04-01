@@ -150,12 +150,13 @@ def get_unsynced_capsules() -> list[dict]:
     c = conn.cursor()
     rows = c.execute(
         "SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-        "salt,nonce,encrypted_len,content_hash,synced "
+        "salt,nonce,encrypted_len,content_hash,synced,source_type,category "
         "FROM capsules WHERE synced=0"
     ).fetchall()
     conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","url",
-            "created_at","salt","nonce","encrypted_len","content_hash","synced"]
+            "created_at","salt","nonce","encrypted_len","content_hash","synced",
+            "source_type","category"]
     return [dict(zip(keys, r)) for r in rows]
 
 

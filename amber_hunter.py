@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.2
+Amber-Hunter v1.2.4
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -296,7 +296,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="0.9.6")
+app = FastAPI(title="Amber Hunter", version="1.2.4")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -442,13 +442,15 @@ def get_memories(limit: int = 20, request: Request = None):
     items = []
     for c in capsules:
         items.append({
-            "id":         c["id"],
-            "memo":       c["memo"],
-            "tags":       c["tags"],
-            "source":     c.get("window_title") or c.get("session_id") or "unknown",
-            "created_at": c["created_at"],
-            "synced":     bool(c["synced"]),
-            "encrypted":  bool(c.get("salt")),
+            "id":          c["id"],
+            "memo":        c["memo"],
+            "tags":        c["tags"],
+            "category":    c.get("category") or "",
+            "source_type": c.get("source_type") or "manual",
+            "source":      c.get("window_title") or c.get("session_id") or "unknown",
+            "created_at":  c["created_at"],
+            "synced":      bool(c["synced"]),
+            "encrypted":   bool(c.get("salt")),
         })
     return JSONResponse({
         "total":    len(items),
@@ -461,21 +463,24 @@ def get_memories(limit: int = 20, request: Request = None):
 
 
 @app.get("/capsules")
-def list_capsules_handler(authorization: str = Header(None), request: Request = None):
+def list_capsules_handler(authorization: str = Header(None), request: Request = None,
+                          limit: int = 50):
     verify_token(authorization)
-    capsules = list_capsules(limit=50)
+    capsules = list_capsules(limit=max(1, min(limit, 300)))
     h = add_cors_headers(request) if request else {}
     return JSONResponse({
         "capsules": [
             {
-                "id": c["id"],
-                "memo": c["memo"],
-                "content": c.get("content") or "",
-                "tags": c["tags"],
-                "session_id": c["session_id"],
-                "window_title": c["window_title"],
-                "created_at": c["created_at"],
-                "synced": bool(c["synced"]),
+                "id":                    c["id"],
+                "memo":                  c["memo"],
+                "content":               c.get("content") or "",
+                "tags":                  c["tags"],
+                "category":              c.get("category") or "",
+                "source_type":           c.get("source_type") or "manual",
+                "session_id":            c["session_id"],
+                "window_title":          c["window_title"],
+                "created_at":            c["created_at"],
+                "synced":                bool(c["synced"]),
                 "has_encrypted_content": bool(c.get("salt")),
             }
             for c in capsules
@@ -593,17 +598,15 @@ def recall_memories(
     authorization: str = Header(None),
 ):
     """
-        else:
     AI 在回复前调用此端点，用返回的记忆补充上下文。
 
     参数：
       q: 搜索查询（用户当前消息）
       limit: 返回记忆数量（默认 3）
-      mode: keyword | semantic | auto（默认 auto）
-      rerank: 是否用 LLM 重排序（默认 False，需要 LLM API key）
+      mode: keyword | semantic | auto/hybrid（默认 auto）
+      rerank: 是否用 LLM 重排序（默认 False）
 
-    返回：
-      memories: 相关记忆列表，每条含 injected_prompt（注入用的提示文本）
+    v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
     """
     raw_token = request.query_params.get("token")
     if not raw_token:
@@ -618,135 +621,149 @@ def recall_memories(
 
     q_lower = q.lower().strip()
 
-    # ── 读取所有胶囊 ────────────────────────────────
+    # ── 读取所有胶囊（含 category）────────────────
     conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
     c = conn.cursor()
     rows = c.execute(
-        "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced "
-        "FROM capsules ORDER BY created_at DESC LIMIT 200"
+        "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced,source_type,category "
+        "FROM capsules ORDER BY created_at DESC LIMIT 300"
     ).fetchall()
     conn.close()
 
-    keys = ["id","memo","content","tags","session_id","window_title","url","created_at","salt","nonce","synced"]
-    capsules = [dict(zip(keys, r)) for r in rows]
+    keys = ["id","memo","content","tags","session_id","window_title","url",
+            "created_at","salt","nonce","synced","source_type","category"]
+    capsules_raw = [dict(zip(keys, r)) for r in rows]
 
     # ── 解密 content ──────────────────────────────
     master_pw = get_master_password()
-    parsed_capsules = []
-    for cap in capsules:
+    parsed = []
+    for cap in capsules_raw:
         content = cap.get("content") or ""
         if cap.get("salt") and cap.get("nonce") and content and master_pw:
             try:
-                import base64
-                salt = base64.b64decode(cap["salt"])
-                nonce = base64.b64decode(cap["nonce"])
-                ciphertext = base64.b64decode(content)
+                import base64 as _b64
+                salt = _b64.b64decode(cap["salt"])
+                nonce = _b64.b64decode(cap["nonce"])
+                ciphertext = _b64.b64decode(content)
                 key = derive_key(master_pw, salt)
                 plaintext = decrypt_content(ciphertext, key, nonce)
                 content = plaintext.decode("utf-8") if plaintext else ""
             except Exception:
                 content = ""
-        cap["_decrypted_content"] = content
-        parsed_capsules.append(cap)
+        cap["_text"] = f"{cap.get('memo','')}\n{content}"  # 用于语义编码
+        cap["_plain_content"] = content
+        parsed.append(cap)
 
-    # ── 关键词搜索 ────────────────────────────────
-    def score_keyword(cap):
+    # ── 关键词评分（全量）────────────────────────
+    def _kw_score(cap) -> float:
         score = 0
         qw = q_lower.split()
         memo = (cap.get("memo") or "").lower()
         tags = (cap.get("tags") or "").lower()
-        content = (cap.get("_decrypted_content") or "").lower()
+        text = (cap.get("_plain_content") or "").lower()
         for w in qw:
             score += memo.count(w) * 3
             score += tags.count(w) * 2
-            score += content.count(w)
-        # 包含完整查询句子的加分
+            score += text.count(w)
         if q_lower in memo: score += 10
-        if q_lower in content: score += 5
-        return score
+        if q_lower in text: score += 5
+        return float(score)
 
-    scored = [(score_keyword(c), c) for c in parsed_capsules]
-    scored = [(s, c) for s, c in scored if s > 0]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = scored[:limit]
+    kw_scores = [(_kw_score(c), c) for c in parsed]
+    max_kw = max((s for s, _ in kw_scores), default=1.0) or 1.0
+    # 归一化关键词分到 0-1
+    kw_norm = [(s / max_kw, c) for s, c in kw_scores]
 
-    # ── 构建注入提示 ──────────────────────────────
-    memories = []
-    for score, cap in top:
-        content = cap.get("_decrypted_content", "")
-        memo = cap.get("memo", "")
-        tags = cap.get("tags", "")
-        created = cap.get("created_at", 0)
-
-        injected = f"""[琥珀记忆 | {tags} | {created:.0f}]
-记忆：{memo}
-内容：{content[:300]}{"..." if len(content) > 300 else ""}"""
-        memories.append({
-            "id": cap["id"],
-            "memo": memo,
-            "content": content[:500],
-            "tags": tags,
-            "created_at": created,
-            "relevance_score": round(min(score / 10, 1.0), 2),
-            "injected_prompt": injected,
-        })
-
-    # ── 语义搜索（可选）───────────────────────────
+    # ── 语义评分（全量，v1.2.3 修复：不再只对关键词候选做）────
     search_mode = mode
-    if mode == "auto" or mode == "semantic":
+    sem_scores: dict[str, float] = {}  # capsule_id -> semantic similarity
+
+    if mode in ("auto", "semantic", "hybrid"):
         try:
+            import numpy as _np
             global _EMBED_MODEL
             if _EMBED_MODEL is None:
                 from sentence_transformers import SentenceTransformer
                 _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
             model = _EMBED_MODEL
             q_vec = model.encode(q)
-            cap_vecs = model.encode([c.get("_decrypted_content", "")[:512] for _, c in scored[:50]])
-            # 简单余弦相似度
-            import numpy as np
-            sims = np.dot(cap_vecs, q_vec) / (np.linalg.norm(cap_vecs, axis=1) * np.linalg.norm(q_vec) + 1e-8)
-            top_semantic = sorted(
-                [(float(sims[i]), scored[i][1]) for i in range(len(sims))],
-                key=lambda x: x[0], reverse=True
-            )[:limit]
-            # 合并去重
-            seen = {m["id"] for m in memories}
-            for s, c in top_semantic:
-                if c["id"] not in seen:
-                    memories.append({
-                        "id": c["id"],
-                        "memo": c.get("memo", ""),
-                        "content": c.get("_decrypted_content", "")[:500],
-                        "tags": c.get("tags", ""),
-                        "created_at": c.get("created_at", 0),
-                        "relevance_score": round(float(s), 2),
-                        "injected_prompt": f"[琥珀记忆 | {c.get('tags','')}]\n记忆：{c.get('memo','')}\n内容：{c.get('_decrypted_content','')[:300]}",
-                    })
-                    seen.add(c["id"])
-                    if len(memories) >= limit:
-                        break
-            search_mode = "semantic+keyword"
+            texts = [c["_text"][:512] for c in parsed]
+            if texts:
+                cap_vecs = model.encode(texts)
+                norms = _np.linalg.norm(cap_vecs, axis=1) * _np.linalg.norm(q_vec) + 1e-8
+                sims = _np.dot(cap_vecs, q_vec) / norms
+                for i, cap in enumerate(parsed):
+                    sem_scores[cap["id"]] = float(sims[i])
+            search_mode = "hybrid" if mode in ("auto", "hybrid") else "semantic"
         except ImportError:
             if mode == "semantic":
                 return JSONResponse(
-                    {"error": "semantic search requires sentence-transformers. Install: pip install sentence-transformers"},
+                    {"error": "语义搜索需要 sentence-transformers，请运行：pip install sentence-transformers"},
                     status_code=400, headers=add_cors_headers(request)
                 )
             search_mode = "keyword"
 
-    # 缩短解密明文在内存中的存活窗口
-    del parsed_capsules
+    # ── 混合评分 + 排序 ───────────────────────────
+    combined = []
+    for kw_n, cap in kw_norm:
+        sem = sem_scores.get(cap["id"], 0.0)
+        if search_mode == "hybrid":
+            final = 0.4 * kw_n + 0.6 * sem
+        elif search_mode == "semantic":
+            final = sem
+        else:
+            final = kw_n
+        combined.append((final, cap))
+
+    # 过滤掉完全无信号的结果
+    if search_mode == "keyword":
+        combined = [(s, c) for s, c in combined if s > 0]
+    else:
+        combined = [(s, c) for s, c in combined if s > 0.05]
+
+    combined.sort(key=lambda x: x[0], reverse=True)
+    top = combined[:limit]
+
+    # ── 组装返回 ─────────────────────────────────
+    def _build_memory(score: float, cap: dict) -> dict:
+        memo = cap.get("memo", "")
+        plain = cap.get("_plain_content", "")
+        tags = cap.get("tags", "")
+        cat = cap.get("category", "") or ""
+        created = cap.get("created_at", 0)
+        cat_label = f" [{cat}]" if cat else ""
+        injected = (
+            f"[琥珀记忆{cat_label} | {tags}]\n"
+            f"记忆：{memo}\n"
+            f"内容：{plain[:400]}{'...' if len(plain) > 400 else ''}"
+        )
+        return {
+            "id":              cap["id"],
+            "memo":            memo,
+            "content":         plain[:500],
+            "tags":            tags,
+            "category":        cat,
+            "source_type":     cap.get("source_type", ""),
+            "created_at":      created,
+            "relevance_score": round(score, 3),
+            "injected_prompt": injected,
+        }
+
+    memories = [_build_memory(s, c) for s, c in top]
+
+    # 清理解密明文
+    del parsed
     gc.collect()
 
-    # 可选：LLM 重排序（异步，不阻塞主流程）
+    # 可选：LLM 重排序
     if rerank and memories:
         memories = _rerank_memories_llm(q, memories)
 
     return JSONResponse({
-        "memories": memories[:limit],
-        "query": q,
-        "mode": search_mode,
-        "count": len(memories),
+        "memories":          memories[:limit],
+        "query":             q,
+        "mode":              search_mode,
+        "count":             len(memories),
         "semantic_available": _semantic_available(),
     }, headers=add_cors_headers(request))
 
@@ -1092,82 +1109,95 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
 
 
 # ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
-def _background_sync() -> dict:
+def _do_sync_capsules(unsynced: list, api_token: str, huper_url: str, master_pw: str) -> dict:
     """
-    无 HTTP 上下文的同步实现，可安全在后台线程调用。
-    返回 {"synced": int, "total": int, "errors": list}
+    核心同步逻辑（v1.2.4）。
+    - 单个 httpx.Client 复用连接，避免每条胶囊建立新 TCP 连接
+    - payload 包含 source_type / category，确保云端字段完整
+    - 返回 {"synced": int, "total": int, "errors": list}
     """
+    import httpx
+    synced_count = 0
+    errors = []
+
     try:
-        import httpx
-        api_token = get_api_token()
-        huper_url = get_huper_url() or "https://huper.org/api"
-        master_pw = get_master_password()
-        if not master_pw:
-            logging.warning("[amber-hunter] auto-sync: master_password not set, skip")
-            return {"synced": 0, "total": 0, "errors": ["master_password not set"]}
+        with httpx.Client(timeout=15.0, trust_env=False) as client:
+            for capsule in unsynced:
+                try:
+                    salt_b64 = capsule.get("salt")
+                    if not salt_b64:
+                        errors.append({"id": capsule["id"], "error": "no salt, skipped"})
+                        continue
 
-        unsynced = get_unsynced_capsules()
-        if not unsynced:
-            return {"synced": 0, "total": 0, "errors": []}
+                    salt = base64.b64decode(salt_b64)
+                    key  = derive_key(master_pw, salt)
 
-        synced_count = 0
-        errors = []
+                    # content 已在本地加密，直接传密文
+                    content_enc   = capsule.get("content") or ""
+                    content_nonce = capsule.get("nonce")   or ""
 
-        for capsule in unsynced:
-            try:
-                salt_b64 = capsule.get("salt")
-                if not salt_b64:
-                    errors.append({"id": capsule["id"], "error": "no salt"})
-                    continue
+                    # memo / tags 在此加密
+                    memo_bytes = (capsule.get("memo") or "").encode("utf-8")
+                    memo_ct, memo_nonce = encrypt_content(memo_bytes, key)
+                    memo_enc       = base64.b64encode(memo_ct).decode()
+                    memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
 
-                salt = base64.b64decode(salt_b64)
-                key  = derive_key(master_pw, salt)
+                    tags_bytes = (capsule.get("tags") or "").encode("utf-8")
+                    tags_ct, tags_nonce = encrypt_content(tags_bytes, key)
+                    tags_enc       = base64.b64encode(tags_ct).decode()
+                    tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
 
-                content_enc   = capsule.get("content") or ""
-                content_nonce = capsule.get("nonce")   or ""
+                    payload = {
+                        "e2e":           True,
+                        "salt":          salt_b64,
+                        "memo_enc":      memo_enc,
+                        "memo_nonce":    memo_nonce_b64,
+                        "content_enc":   content_enc,
+                        "content_nonce": content_nonce,
+                        "tags_enc":      tags_enc,
+                        "tags_nonce":    tags_nonce_b64,
+                        "created_at":    capsule.get("created_at"),
+                        "session_id":    capsule.get("session_id"),
+                        "source_type":   capsule.get("source_type") or "manual",
+                        "category":      capsule.get("category") or "",
+                    }
 
-                memo = (capsule.get("memo") or "").encode("utf-8")
-                memo_ct, memo_nonce = encrypt_content(memo, key)
-                memo_enc       = base64.b64encode(memo_ct).decode()
-                memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
-
-                tags = (capsule.get("tags") or "").encode("utf-8")
-                tags_ct, tags_nonce = encrypt_content(tags, key)
-                tags_enc       = base64.b64encode(tags_ct).decode()
-                tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
-
-                payload = {
-                    "e2e":           True,
-                    "salt":          salt_b64,
-                    "memo_enc":      memo_enc,
-                    "memo_nonce":    memo_nonce_b64,
-                    "content_enc":   content_enc,
-                    "content_nonce": content_nonce,
-                    "tags_enc":      tags_enc,
-                    "tags_nonce":    tags_nonce_b64,
-                    "created_at":    capsule.get("created_at"),
-                    "session_id":    capsule.get("session_id"),
-                }
-
-                with httpx.Client(timeout=15.0, trust_env=False) as client:
                     resp = client.post(
                         f"{huper_url}/capsules",
                         json=payload,
                         headers={"Authorization": f"Bearer {api_token}"}
                     )
 
-                if resp.status_code in (200, 201):
-                    mark_synced(capsule["id"])
-                    synced_count += 1
-                else:
-                    errors.append({"id": capsule["id"], "status": resp.status_code})
+                    if resp.status_code in (200, 201):
+                        mark_synced(capsule["id"])
+                        synced_count += 1
+                    else:
+                        errors.append({"id": capsule["id"], "status": resp.status_code,
+                                       "body": resp.text[:120]})
+                except Exception as e:
+                    errors.append({"id": capsule["id"], "error": str(e)})
 
-            except Exception as e:
-                errors.append({"id": capsule["id"], "error": str(e)})
+    except Exception as e:
+        errors.append({"error": f"httpx init failed: {e}"})
 
-        logging.info(f"[amber-hunter] auto-sync done: {synced_count}/{len(unsynced)}")
-        return {"synced": synced_count, "total": len(unsynced), "errors": errors}
+    return {"synced": synced_count, "total": len(unsynced), "errors": errors}
 
+
+def _background_sync() -> dict:
+    """后台线程同步入口（无 HTTP 上下文）。"""
+    try:
+        api_token = get_api_token()
+        huper_url = get_huper_url() or "https://huper.org/api"
+        master_pw = get_master_password()
+        if not master_pw:
+            logging.warning("[amber-hunter] auto-sync: master_password not set, skip")
+            return {"synced": 0, "total": 0, "errors": ["master_password not set"]}
+        unsynced = get_unsynced_capsules()
+        if not unsynced:
+            return {"synced": 0, "total": 0, "errors": []}
+        result = _do_sync_capsules(unsynced, api_token, huper_url, master_pw)
+        logging.info(f"[amber-hunter] auto-sync: {result['synced']}/{result['total']}")
+        return result
     except Exception as e:
         logging.error(f"[amber-hunter] _background_sync error: {e}")
         return {"synced": 0, "total": 0, "errors": [str(e)]}
@@ -1204,76 +1234,18 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
             status_code=400, headers=add_cors_headers(request)
         )
 
-    import httpx
     unsynced = get_unsynced_capsules()
     if not unsynced:
-        return JSONResponse({"synced": 0, "message": "没有需要同步的胶囊"}, headers=add_cors_headers(request))
+        return JSONResponse({"synced": 0, "total": 0, "message": "没有需要同步的胶囊"},
+                            headers=add_cors_headers(request))
 
-    synced_count = 0
-    errors = []
-
-    for capsule in unsynced:
-        try:
-            salt_b64 = capsule.get("salt")
-            if not salt_b64:
-                # 无盐值说明没有加密 content，跳过此胶囊
-                errors.append({"id": capsule["id"], "error": "no salt, capsule not encrypted"})
-                continue
-
-            salt = base64.b64decode(salt_b64)
-            key  = derive_key(master_pw, salt)
-
-            # ── content：已在本地加密，直接传密文 ──────────
-            content_enc   = capsule.get("content") or ""
-            content_nonce = capsule.get("nonce")   or ""
-
-            # ── memo：本地加密 ───────────────────────────
-            memo = (capsule.get("memo") or "").encode("utf-8")
-            memo_ct, memo_nonce = encrypt_content(memo, key)
-            memo_enc   = base64.b64encode(memo_ct).decode()
-            memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
-
-            # ── tags：本地加密 ───────────────────────────
-            tags = (capsule.get("tags") or "").encode("utf-8")
-            tags_ct, tags_nonce = encrypt_content(tags, key)
-            tags_enc   = base64.b64encode(tags_ct).decode()
-            tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
-
-            # ── 上传密文到 huper 云端 ────────────────────
-            payload = {
-                "e2e":           True,
-                "salt":          salt_b64,
-                "memo_enc":      memo_enc,
-                "memo_nonce":    memo_nonce_b64,
-                "content_enc":   content_enc,
-                "content_nonce": content_nonce,
-                "tags_enc":      tags_enc,
-                "tags_nonce":    tags_nonce_b64,
-                "created_at":    capsule.get("created_at"),
-                "session_id":    capsule.get("session_id"),
-            }
-
-            with httpx.Client(timeout=15.0, trust_env=False) as client:
-                resp = client.post(
-                    f"{huper_url}/capsules",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {api_token}"}
-                )
-
-            if resp.status_code in (200, 201):
-                mark_synced(capsule["id"])
-                synced_count += 1
-            else:
-                errors.append({"id": capsule["id"], "status": resp.status_code, "body": resp.text[:100]})
-
-        except Exception as e:
-            errors.append({"id": capsule["id"], "error": str(e)})
-
+    result = _do_sync_capsules(unsynced, api_token, huper_url, master_pw)
+    logging.info(f"[amber-hunter] /sync: {result['synced']}/{result['total']}")
     h = add_cors_headers(request)
     return JSONResponse({
-        "synced": synced_count,
-        "total":  len(unsynced),
-        "errors": errors if errors else None,
+        "synced": result["synced"],
+        "total":  result["total"],
+        "errors": result["errors"] or None,
     }, headers=h)
 
 # ── 配置读取（Dashboard 用）────────────────────────────
@@ -1373,22 +1345,49 @@ def get_status(request: Request):
     master_pw = get_master_password()
     api_token = get_api_token()
     h = add_cors_headers(request)
+
+    # v1.2.3: DB 统计 + 模型状态 + 队列信息
+    db_stats = {"capsule_count": 0, "queue_pending": 0, "last_sync": None}
+    try:
+        db_path = HOME / ".amber-hunter" / "hunter.db"
+        if db_path.exists():
+            _conn = sqlite3.connect(str(db_path))
+            _c = _conn.cursor()
+            row = _c.execute("SELECT COUNT(*) FROM capsules").fetchone()
+            db_stats["capsule_count"] = row[0] if row else 0
+            row2 = _c.execute(
+                "SELECT COUNT(*) FROM memory_queue WHERE status='pending'"
+            ).fetchone()
+            db_stats["queue_pending"] = row2[0] if row2 else 0
+            # last_sync: 最近一条已同步胶囊的 created_at（近似值）
+            row3 = _c.execute(
+                "SELECT MAX(created_at) FROM capsules WHERE synced=1"
+            ).fetchone()
+            db_stats["last_sync"] = row3[0] if row3 and row3[0] else None
+            _conn.close()
+    except Exception:
+        pass
+
     return JSONResponse({
-        "running": True,
-        "version": "1.2.2",
-        "platform": get_os(),
-        "headless": is_headless(),
-        "session_key": session_key,
+        "running":            True,
+        "version":            "1.2.4",
+        "platform":           get_os(),
+        "headless":           is_headless(),
+        "session_key":        session_key,
         "has_master_password": bool(master_pw),
-        "has_api_token": bool(api_token),
-        "workspace": str(HOME / ".openclaw" / "workspace"),
-        "huper_url": get_huper_url(),
+        "has_api_token":      bool(api_token),
+        "workspace":          str(HOME / ".openclaw" / "workspace"),
+        "huper_url":          get_huper_url(),
+        "semantic_model_loaded": _EMBED_MODEL is not None,
+        "capsule_count":      db_stats["capsule_count"],
+        "queue_pending":      db_stats["queue_pending"],
+        "last_sync":          db_stats["last_sync"],
     }, headers=h)
 
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.2", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.4", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():

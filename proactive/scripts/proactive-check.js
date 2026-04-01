@@ -22,7 +22,8 @@ const http = require('http');
 const HOME = os.homedir();
 const SESSIONS_DIR = path.join(HOME, '.openclaw', 'agents', 'main', 'sessions');
 const PENDING_FILE = path.join(HOME, '.amber-hunter', 'pending_extract.jsonl');
-const CONFIG_PATH = path.join(HOME, '.amber-hunter', 'config.json');
+const CONFIG_PATH   = path.join(HOME, '.amber-hunter', 'config.json');
+const OPENCLAW_CONFIG = path.join(HOME, '.openclaw', 'openclaw.json');
 const LOG_PATH = path.join(HOME, '.amber-hunter', 'amber-proactive.log');
 
 const AMBER_PORT = 18998;
@@ -45,8 +46,11 @@ function getConfig() {
 }
 
 function getApiKey() {
-  const cfg = getConfig();
-  return cfg.api_key || cfg.apiToken || '';
+  // Read from OpenClaw config: models.providers['minimax-cn'].apiKey
+  try {
+    const openclawConfig = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG, 'utf8'));
+    return openclawConfig?.models?.providers?.['minimax-cn']?.apiKey || '';
+  } catch { return ''; }
 }
 
 // ── MiniMax LLM Call ─────────────────────────────────────────────────
