@@ -170,7 +170,9 @@ function getAmberToken() {
 
 function writeCapsule(token, memo, content, tags) {
   return new Promise(resolve => {
-    const capsule = { memo: memo.slice(0, 60), content, tags };
+    // memo 最多80字符，整句不断词
+    const memoText = memo.length > 80 ? memo.slice(0, 77) + '…' : memo;
+    const capsule = { memo: memoText, content, tags };
     const bodyStr = JSON.stringify(capsule);
     const opts = {
       hostname: 'localhost', port: AMBER_PORT, path: '/capsules',
