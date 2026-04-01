@@ -156,6 +156,18 @@ function buildConversationText(messages, maxChars = 8000) {
 
 // ── Amber API ────────────────────────────────────────────────────────
 
+function getAmberToken() {
+  return new Promise(resolve => {
+    http.get({ hostname: 'localhost', port: AMBER_PORT, path: '/token' }, res => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data).api_key); } catch { resolve(''); }
+      });
+    }).on('error', () => resolve(''));
+  });
+}
+
 function writeCapsule(token, memo, content, tags) {
   return new Promise(resolve => {
     const capsule = { memo: memo.slice(0, 60), content, tags };
@@ -243,12 +255,13 @@ ${conversation}
   const worthIt = facts.filter(f => f.worth);
   log(`[llm] Extracted ${facts.length} facts, ${worthIt.length} worth saving`);
 
-  const token = getApiKey();
+  // 获取 amber-hunter 自己的 token（不是 MiniMax key）
+  const amberToken = await getAmberToken();
   let written = 0;
 
   for (const { fact, worth } of facts) {
     if (!worth) continue;
-    const ok = await writeCapsule(token, fact, fact, 'auto-extract');
+    const ok = await writeCapsule(amberToken, fact, fact, 'auto-extract');
     if (ok) written++;
     log(`[capsule] ${ok ? '✅' : '❌'} ${fact.slice(0, 50)}`);
   }
