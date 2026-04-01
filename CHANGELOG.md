@@ -1,3 +1,14 @@
+## [v1.2.5] — 2026-04-01
+
+### Fixed
+- **proactive-check.js API key 路径错误** — 之前从 `cfg.providers['minimax-cn'].apiKey` 读取，实际 OpenClaw 配置结构为 `cfg.models.providers['minimax-cn'].apiKey`；导致所有用户的 amber-proactive 自动捕获认证失败；从不动脚本改为正确路径
+- **LaunchAgent plist 路径错误（Anke 本地问题）** — plist 指向 `~/.openclaw/workspace/skills/amber-proactive/`（不存在），实际为 `~/.openclaw/skills/amber-hunter/proactive/`；导致 amber-proactive 进程从未真正启动
+
+### Changed
+- **proactive-check.js MiniMax 模型** — 从 `MiniMax-M2.1-flash` 升级为 `MiniMax-M2.7-highspeed`（与 OpenClaw 主模型一致，提取质量更高）
+
+---
+
 ## [v1.2.4] — 2026-04-01
 
 ### Fixed

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.4
+Amber-Hunter v1.2.5
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -296,7 +296,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.4")
+app = FastAPI(title="Amber Hunter", version="1.2.5")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1111,7 +1111,7 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
 # ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
 def _do_sync_capsules(unsynced: list, api_token: str, huper_url: str, master_pw: str) -> dict:
     """
-    核心同步逻辑（v1.2.4）。
+    核心同步逻辑（v1.2.5）。
     - 单个 httpx.Client 复用连接，避免每条胶囊建立新 TCP 连接
     - payload 包含 source_type / category，确保云端字段完整
     - 返回 {"synced": int, "total": int, "errors": list}
@@ -1370,7 +1370,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.4",
+        "version":            "1.2.5",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -1387,7 +1387,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.4", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.5", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
