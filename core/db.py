@@ -67,6 +67,29 @@ def init_db():
         )
     """)
 
+    # v1.2.8+: hit tracking columns on capsules
+    for col in [
+        "last_accessed REAL DEFAULT 0",
+        "hotness_score REAL DEFAULT 0.0",
+        "hit_count INTEGER DEFAULT 0",
+    ]:
+        try:
+            c.execute(f"ALTER TABLE capsules ADD COLUMN {col}")
+        except Exception:
+            pass
+
+    # v1.2.8+: memory_hits — record each recall usage
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS memory_hits (
+            id               TEXT PRIMARY KEY,
+            capsule_id       TEXT NOT NULL,
+            session_id       TEXT,
+            hit_at           REAL DEFAULT (strftime('%s', 'now')),
+            search_query     TEXT,
+            relevance_score  REAL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -236,3 +259,51 @@ def set_config(key: str, value: str):
     c.execute("INSERT OR REPLACE INTO config (key,value) VALUES (?,?)", (key, value))
     conn.commit()
     conn.close()
+
+
+# ── memory_hits — hit tracking v1.2.8 ──────────────────────────────
+
+def insert_memory_hit(
+    hit_id: str,
+    capsule_id: str,
+    session_id: str | None,
+    search_query: str | None,
+    relevance_score: float | None,
+) -> bool:
+    """Insert a record of a recall hit."""
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT OR IGNORE INTO memory_hits
+              (id, capsule_id, session_id, hit_at, search_query, relevance_score)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (hit_id, capsule_id, session_id or None, time.time(),
+              search_query or None, relevance_score or None))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def update_capsule_hit(capsule_id: str, relevance_score: float) -> None:
+    """
+    Update hotness_score and last_accessed for a capsule after a recall hit.
+    Formula: hotness += relevance_score * 0.1  (diminishing bonus per hit)
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        now = time.time()
+        c.execute("""
+            UPDATE capsules
+            SET last_accessed = ?,
+                hit_count = hit_count + 1,
+                hotness_score = MIN(hotness_score + ?, 10.0)
+            WHERE id = ?
+        """, (now, relevance_score * 0.1, capsule_id))
+        conn.commit()
+    finally:
+        conn.close()

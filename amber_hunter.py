@@ -20,7 +20,8 @@ from core.keychain import (
 )
 from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_synced,
     get_unsynced_capsules, get_config, set_config,
-    queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update)
+    queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update,
+    insert_memory_hit, update_capsule_hit)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY
@@ -227,6 +228,88 @@ def classify_topics(text: str, existing_tags: str = "") -> str:
     if not text:
         return existing_tags or ""
 
+
+# ── v1.2.8: LLM structured memory extraction (Proactive V4) ───────────
+
+_MEMORY_EXTRACT_SYSTEM = """You are a memory analyst. Your task is to extract important, non-obvious facts from a conversation transcript.
+
+Extract memories that are:
+- FACT: verifiable information (project names, decisions made, numbers, schedules)
+- DECISION: explicit choices or commitments made
+- PREFERENCE: expressed likes/dislikes/habits
+- ERROR: mistakes, bugs, or failures mentioned
+- INSIGHT: non-obvious observations or lessons learned
+
+Rules:
+- Only extract memories with importance >= 0.6 (on a 0.0–1.0 scale)
+- Return at most 10 memories, sorted by importance descending
+- importance = affected_scope × frequency × time_relevance (0.0–1.0)
+- tags = max 4 keywords; entities = names/projects/locations found
+- Return STRICT JSON only — no markdown, no explanation, no thinking
+- If no valuable memories exist, return []"""
+
+_MEMORY_EXTRACT_USER = """Extract structured memories from this conversation:
+
+{conversation}
+
+Return exactly this JSON format:
+{{
+  "memories": [
+    {{
+      "type": "fact|decision|preference|error|insight",
+      "summary": "one-sentence description of this memory",
+      "importance": 0.0-1.0,
+      "tags": ["tag1", "tag2"],
+      "entities": ["entity1"],
+      "expires_at": null
+    }}
+  ]
+}}"""
+
+
+def _llm_extract_memories(text: str) -> list[dict]:
+    """
+    v1.2.8: Use LLM to extract structured memories from raw conversation text.
+
+    Returns a list of memory dicts with keys: type, summary, importance, tags, entities, expires_at.
+    Only memories with importance >= 0.6 are returned.
+    """
+    if not text or not LLM_READY:
+        return []
+    if len(text.strip()) < 50:
+        return []
+
+    try:
+        llm = get_llm()
+        if not llm.config.api_key:
+            return []
+
+        user_prompt = _MEMORY_EXTRACT_USER.format(conversation=text[:6000])
+        raw = llm.acomplete(user_prompt, system=_MEMORY_EXTRACT_SYSTEM,
+                             max_tokens=1024, temperature=0.3)
+        if raw.startswith("[ERROR"):
+            return []
+
+        # Parse JSON response
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+        import json as _json
+        data = _json.loads(cleaned)
+        memories = data.get("memories", [])
+
+        # Filter: only importance >= 0.6
+        filtered = [m for m in memories if isinstance(m, dict) and m.get("importance", 0) >= 0.6]
+        # Sort by importance desc, keep top 10
+        filtered.sort(key=lambda x: x.get("importance", 0), reverse=True)
+        return filtered[:10]
+
+    except Exception:
+        return []
+
     topics = _get_topics_from_config()
     text_lower = text.lower()
     candidate_topics = []
@@ -367,6 +450,33 @@ def api_classify(request: Request, text: str = ""):
             all_tags = list(existing) + new_tags
             topics = ",".join(all_tags[:5])
     return JSONResponse({"topics": topics}, headers=headers)
+
+
+# ── v1.2.8: Proactive V4 — LLM structured memory extraction ─────────
+class ExtractIn(BaseModel):
+    text: str
+    source: str = "unknown"
+
+
+@app.post("/extract")
+async def extract_memories(request: Request, body: ExtractIn, authorization: str = Header(None)):
+    """
+    LLM-powered structured memory extraction from raw conversation text (Proactive V4).
+
+    Body: {"text": "...", "source": "session_id or description"}
+    Returns: {"memories": [{"type": "...", "summary": "...", "importance": 0.0-1.0, "tags": [], "entities": []}]}
+
+    认证：Bearer Token
+    """
+    headers = add_cors_headers(request)
+    if authorization:
+        verify_token(authorization)
+    if not body.text or len(body.text.strip()) < 50:
+        return JSONResponse({"memories": []}, headers=headers)
+
+    memories = _llm_extract_memories(body.text)
+    return JSONResponse({"source": body.source, "memories": memories, "count": len(memories)}, headers=headers)
+
 
 # ── Session 读取（无认证，供前端读取）──────────────────
 @app.get("/session/summary")
@@ -747,6 +857,7 @@ def recall_memories(
             "created_at":      created,
             "relevance_score": round(score, 3),
             "injected_prompt": injected,
+            "hit_url":         f"/recall/{cap['id']}/hit",  # v1.2.8: hit tracking
         }
 
     memories = [_build_memory(s, c) for s, c in top]
@@ -766,6 +877,38 @@ def recall_memories(
         "count":             len(memories),
         "semantic_available": _semantic_available(),
     }, headers=add_cors_headers(request))
+
+
+# ── v1.2.8: Hit tracking ───────────────────────────────────────────
+class HitIn(BaseModel):
+    session_id: str | None = None
+    search_query: str | None = None
+    relevance_score: float | None = None
+
+
+@app.patch("/recall/{capsule_id}/hit")
+def record_hit(
+    capsule_id: str,
+    body: HitIn,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """
+    Record that a recalled memory was useful (hit tracking v1.2.8).
+
+    Body: {"session_id": "...", "search_query": "...", "relevance_score": 0.85}
+    Returns: {"ok": True}
+    """
+    headers = add_cors_headers(request)
+    verify_token(authorization)
+
+    hit_id = secrets.token_hex(8)
+    rel = body.relevance_score if body.relevance_score is not None else 0.5
+
+    insert_memory_hit(hit_id, capsule_id, body.session_id, body.search_query, rel)
+    update_capsule_hit(capsule_id, rel)
+
+    return JSONResponse({"ok": True}, headers=headers)
 
 
 def _rerank_memories_llm(query: str, memories: list[dict]) -> list[dict]:

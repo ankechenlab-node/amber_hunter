@@ -53,52 +53,68 @@ function getApiKey() {
   } catch { return ''; }
 }
 
-// ── MiniMax LLM Call ─────────────────────────────────────────────────
+// ── v1.2.8: Amber /extract endpoint (Proactive V4) ───────────────────
 
-function callMinimaxLLM(prompt, apiKey) {
-  return new Promise((resolve, reject) => {
-    const bodyStr = JSON.stringify({
-      model: 'minimax-cn/MiniMax-M2.1-flash',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const url = new URL('https://api.minimaxi.com/anthropic/v1/messages');
+/**
+ * Call amber-hunter's /extract endpoint to get structured memories.
+ * Falls back to writing pending_extract.jsonl on failure (compat).
+ */
+function callExtractEndpoint(conversation, sessionId, amberToken) {
+  return new Promise((resolve) => {
+    const bodyObj = { text: conversation, source: sessionId };
+    const bodyStr = JSON.stringify(bodyObj);
     const opts = {
-      hostname: url.hostname,
-      port: url.port || 443,
-      path: url.pathname,
+      hostname: 'localhost',
+      port: AMBER_PORT,
+      path: '/extract',
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${amberToken}`,
         'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
         'Content-Length': Buffer.byteLength(bodyStr),
       },
     };
-
-    const req = https.request(opts, (res) => {
+    const req = http.request(opts, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
+        if (res.statusCode !== 200) {
+          log(`[extract] HTTP ${res.statusCode}, falling back to pending file`);
+          // Fallback: write pending_extract.jsonl for later processing
+          try {
+            fs.mkdirSync(path.dirname(PENDING_FILE), { recursive: true });
+            fs.appendFileSync(PENDING_FILE, JSON.stringify({
+              session_id: sessionId,
+              text: conversation.slice(0, 4000),
+              message_count: (conversation.match(/\n/g) || []).length,
+              queued_at: new Date().toISOString(),
+            }) + '\n');
+          } catch (e2) { /* ignore */ }
+          resolve([]);
+          return;
+        }
         try {
           const parsed = JSON.parse(data);
-          const items = parsed.content || [];
-          let text = '';
-          for (const item of items) {
-            if (item.type === 'text') { text = item.text; break; }
-          }
-          // 去掉可能的markdown包裹
-          text = text.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-          const result = JSON.parse(text);
-          resolve(result.facts || []);
+          resolve(parsed.memories || []);
         } catch (e) {
-          log(`[llm] Parse error: ${e.message}, raw: ${data.slice(0, 100)}`);
-          resolve([]); // 失败不阻断
+          log(`[extract] Parse error: ${e.message}, raw: ${data.slice(0, 100)}`);
+          resolve([]);
         }
       });
     });
-    req.on('error', e => { log(`[llm] API error: ${e.message}`); resolve([]); });
+    req.on('error', e => {
+      log(`[extract] Connection error: ${e.message}, falling back to pending file`);
+      try {
+        fs.mkdirSync(path.dirname(PENDING_FILE), { recursive: true });
+        fs.appendFileSync(PENDING_FILE, JSON.stringify({
+          session_id: sessionId,
+          text: conversation.slice(0, 4000),
+          message_count: (conversation.match(/\n/g) || []).length,
+          queued_at: new Date().toISOString(),
+        }) + '\n');
+      } catch (e2) { /* ignore */ }
+      resolve([]);
+    });
     req.write(bodyStr);
     req.end();
   });
@@ -198,10 +214,11 @@ function writeCapsule(token, memo, content, tags) {
 
 async function main() {
   const isManual = process.argv.includes('--manual');
-  const apiKey = getApiKey();
 
-  if (!apiKey) {
-    log('[main] No API key found in config, skipping');
+  // v1.2.8: Get amber-hunter token first (needed for /extract endpoint)
+  const amberToken = await getAmberToken();
+  if (!amberToken) {
+    log('[main] No amber-hunter token found, skipping');
     return;
   }
 
@@ -238,38 +255,30 @@ async function main() {
 
   const conversation = buildConversationText(messages);
 
-  // 构建提取 prompt
-  const prompt = `从以下对话中提取关键事实。只返回纯JSON，不要markdown，不要思考过程。
+  // v1.2.8: Call amber-hunter /extract endpoint (Proactive V4)
+  log('[extract] Calling amber-hunter /extract endpoint...');
+  const memories = await callExtractEndpoint(conversation, sessionId, amberToken);
 
-对话：
-${conversation}
-
-输出格式：
-{"facts": [{"fact": "具体描述这个事实", "worth": true}]}`;
-
-  log(`[llm] Calling MiniMax API...`);
-  const facts = await callMinimaxLLM(prompt, apiKey);
-
-  if (!facts || facts.length === 0) {
-    log('[llm] No facts extracted, skipping');
+  if (!memories || memories.length === 0) {
+    log('[extract] No memories extracted, skipping');
     return;
   }
 
-  const worthIt = facts.filter(f => f.worth);
-  log(`[llm] Extracted ${facts.length} facts, ${worthIt.length} worth saving`);
+  log(`[extract] Extracted ${memories.length} memories`);
 
-  // 获取 amber-hunter 自己的 token（不是 MiniMax key）
-  const amberToken = await getAmberToken();
+  // Write capsules for each memory
   let written = 0;
-
-  for (const { fact, worth } of facts) {
-    if (!worth) continue;
-    const ok = await writeCapsule(amberToken, fact, fact, 'auto-extract');
+  for (const mem of memories) {
+    const summary = (mem.summary || '').trim();
+    if (!summary) continue;
+    const tags = ['auto-extract', mem.type || 'fact'].concat(mem.tags || []).slice(0, 5);
+    const content = JSON.stringify(mem, null, 2);
+    const ok = await writeCapsule(amberToken, summary, content, tags.join(','));
     if (ok) written++;
-    log(`[capsule] ${ok ? '✅' : '❌'} ${fact.slice(0, 50)}`);
+    log(`[capsule] ${ok ? '✅' : '❌'} [${mem.type}] ${summary.slice(0, 50)}`);
   }
 
-  log(`[done] Wrote ${written}/${worthIt.length} capsules from ${messages.length} messages`);
+  log(`[done] Wrote ${written}/${memories.length} capsules from ${messages.length} messages`);
 }
 
 main().catch(e => log('[error] ' + e.message));
