@@ -1471,7 +1471,7 @@ async def update_llm_config(request: Request, authorization: str = Header(None))
     else:
         raw_token = f"Bearer {raw_token}"
     verify_token(raw_token)
-    body = await request.get_json()
+    body = await request.json()
     provider = body.get("provider")
     model = body.get("model")
     if provider not in ("minimax", "openai", "claude", "local"):
