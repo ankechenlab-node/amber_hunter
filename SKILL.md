@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.1 | 2026-03-31
+> Version: 1.2.8 | 2026-04-01
 
 ---
 
@@ -96,32 +96,61 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 
 ---
 
-## API Endpoints (v1.1.9)
+## API Endpoints (v1.2.8)
 
 ### Core
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/status` | GET | none | Service health |
-| `/memories` | GET | none (localhost) | Local memory snapshot |
+| `/status` | GET | none | Service health + capsule_count + queue_pending + last_sync + semantic_model_loaded |
+| `/` | GET | none | Root info + version |
 | `/token` | GET | localhost only | Get local API key |
-| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3&rerank=true` for LLM reranking) |
-| `/rerank` | POST | Bearer / ?token= | Re-rank memory candidates with LLM — POST body: `{query, memories}` |
-| `/freeze` | GET/POST | Bearer / ?token= | Capture current dev session context |
-| `/capsules` | GET | Bearer | List local capsules |
-| `/capsules` | POST | Bearer | Create capsule manually |
-| `/sync` | GET | Bearer / ?token= | Sync to huper.org cloud |
-| `/config` | GET/POST | Bearer / ?token= | Read/set config (auto_sync etc.) |
+| `/memories` | GET | localhost only | Local memory snapshot (no auth required) |
 
-### New in v1.1.9 — AI Memory Writes
+### Memory Retrieval
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/ingest` | POST | Bearer / ?token= | AI pushes a memory → queue or direct capsule |
-| `/queue` | GET | Bearer / ?token= | List pending memories awaiting user review |
+| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3&rerank=true`); hybrid mode: `0.4×keyword + 0.6×semantic`; returns category/source_type |
+| `/rerank` | POST | Bearer / ?token= | LLM re-rank candidates; body: `{query, memories[]}` → `{memories: [...]}` |
+| `/recall/{id}/hit` | PATCH | Bearer / ?token= | Increment capsule access count (updates hotness) |
+| `/classify` | GET | none | Topic classify; `?text=<text>` → `{"topics": "tag1,tag2"}`; keyword primary, LLM fallback |
+
+### Memory Writes
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/capsules` | GET | Bearer | List local capsules (`?limit=1-300`); returns category/source_type |
+| `/capsules` | POST | Bearer | Create capsule manually |
+| `/capsules/{id}` | GET | Bearer | Get capsule by ID |
+| `/capsules/{id}` | DELETE | Bearer | Delete capsule |
+| `/ingest` | POST | Bearer / ?token= | AI pushes memory → direct capsule if confidence≥0.95+review_required=false, else → queue |
+| `/extract` | POST | Bearer / ?token= | Structured LLM extraction; body: `{text, source}` → extracted memories |
+
+### Queue Management
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/queue` | GET | Bearer / ?token= | List pending memories awaiting review |
 | `/queue/{id}/approve` | POST | Bearer / ?token= | Accept → writes to capsules |
 | `/queue/{id}/reject` | POST | Bearer / ?token= | Dismiss → status=rejected |
 | `/queue/{id}/edit` | POST | Bearer / ?token= | Edit then accept → writes modified to capsules |
+
+### Session Context (proactive capture)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/freeze` | GET/POST | Bearer / ?token= | Capture current dev session context |
+| `/session/summary` | GET | Bearer | Get current session summary |
+| `/session/files` | GET | Bearer | Get open files in current session |
+
+### Sync & Config
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/sync` | GET | Bearer / ?token= | Sync to huper.org cloud |
+| `/config` | GET/POST | Bearer / ?token= | Read/set config (auto_sync etc.) |
+| `/config/llm` | GET/PUT | Bearer / ?token= | Read/set LLM provider (minimax/openai/claude/local) |
 
 ### Localhost-only (security restricted)
 
@@ -142,7 +171,7 @@ Content-Type: application/json
   "memo": "Anke prefers SQLite over Postgres for simpler deployment",
   "context": "During database selection discussion for amber project",
   "category": "decision",
-  "tags": "decided",
+  "tags": "decided,database",
   "source": "claude_cowork",
   "confidence": 0.9,
   "review_required": true
@@ -152,15 +181,38 @@ Content-Type: application/json
 **Response**:
 ```json
 // Goes to review queue:
-{"queued": true, "queue_id": "abc123", "message": "Added to review queue"}
+{"queued": true, "queue_id": "abc123", "category": "decision", "source_type": "ingest"}
 
 // Written directly (confidence≥0.95 and review_required=false):
-{"queued": false, "capsule_id": "xyz456", "message": "Saved directly"}
+{"queued": false, "capsule_id": "xyz456", "category": "decision", "source_type": "ingest"}
 ```
 
 ---
 
-## Usage Patterns by Client
+## LLM Provider Configuration (v1.2.1+)
+
+amber-hunter supports multiple LLM providers:
+
+| Provider | Config key | Notes |
+|---------|-----------|-------|
+| **MiniMax** | `minimax` | Default; auto-detects API key from OpenClaw config |
+| **OpenAI** | `openai` | GPT-4o mini etc. |
+| **Claude** | `claude` | Claude 3.5 Haiku etc. |
+| **Local** | `local` | Ollama / LM Studio |
+
+```bash
+# Set provider
+curl -X PUT http://localhost:18998/config/llm?token={api_key} \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "openai"}'
+
+# Get current provider
+curl http://localhost:18998/config/llm?token={api_key}
+```
+
+---
+
+## Usage Patterns
 
 ### openclaw / Claude Code
 
@@ -186,22 +238,7 @@ curl -X POST "http://localhost:18998/ingest?token=$TOKEN" \
   -d '{"memo":"Summary: ...", "source":"claude_code", "confidence":0.7, "review_required":true}'
 ```
 
-### Claude in Cowork
-
-Claude in Cowork uses Desktop Commander to call localhost:
-
-```python
-# Push a memory
-mcp__Desktop_Commander__start_process(
-  command='curl -X POST "http://localhost:18998/ingest?token=TOKEN" \
-    -H "Content-Type: application/json" \
-    -d \'{"memo":"...","category":"decision","confidence":0.9,"review_required":true,"source":"claude_cowork"}\''
-)
-```
-
 ### ChatGPT (via GPT Action / cloud API)
-
-Users configure their huper.org API key in the GPT:
 
 ```bash
 curl -X POST https://huper.org/api/ingest \
@@ -217,81 +254,17 @@ curl -X POST https://huper.org/api/ingest \
   }'
 ```
 
-GPT Action OpenAPI spec: see `tasks/gpt-action-schema.yaml` in the amber-site repo.
-
----
-
-## LLM Provider Abstraction (v1.2.0)
-
-amber-hunter uses a unified LLM interface — configure the provider once, all LLM-powered features use it.
-
-### Supported Providers
-
-| Provider | Config key | Notes |
-|---------|-----------|-------|
-| **MiniMax** | `minimax` | Default; reads from `~/.openclaw/openclaw.json` → `models.providers.minimax-cn.apiKey` |
-| **OpenAI** | `openai` | Set `api_key` and `base_url` in `~/.amber-hunter/config.json` → `llm` |
-| **Local (Ollama/LM Studio)** | `local` | Set `base_url` to your local server URL |
-
-### Config Location
-
-```json
-// ~/.amber-hunter/config.json
-{
-  "llm": {
-    "provider": "minimax",
-    "model": "MiniMax-M2.7-highspeed",
-    "api_key": "sk-cp-...",
-    "base_url": "https://api.minimaxi.com/anthropic/v1/messages"
-  }
-}
-```
-
-For MiniMax, amber-hunter auto-detects the API key from:
-1. `MINIMAX_API_KEY` env var
-2. `~/.openclaw/openclaw.json` → `models.providers.minimax-cn.apiKey`
-3. Legacy `~/.amber-hunter/config.json` → root-level `api_key` (if it looks like an LLM key)
-
-LLM-powered features: `/classify` (LLM fallback), `/rerank` (LLM reordering), proactive extraction.
-
 ---
 
 ## Platform Support
 
-| Platform | Auto-start | Keychain | /ingest | /api/ingest |
-|----------|-----------|---------|---------|------------|
-| **macOS** | LaunchAgent (launchctl) | macOS Keychain | ✅ | ✅ |
-| **Windows** | Task Scheduler | Windows Credential Manager (pywin32) | ✅ | ✅ |
-| **Linux desktop** | systemd user service | GNOME Keyring (secret-tool) | ✅ | ✅ |
-| **Linux headless (VPS)** | systemd | config.json fallback (明文) | N/A | ✅ |
-
-### Installation
-
-```bash
-# macOS / Linux
-bash ~/.openclaw/skills/amber-hunter/install.sh
-
-# Verify
-curl http://localhost:18998/status
-curl http://localhost:18998/memories
-```
-
-### Auto-start commands
-
-| Platform | Command |
-|----------|---------|
-| macOS | `launchctl load ~/Library/LaunchAgents/com.huper.amber-hunter.plist` |
-| Linux | `systemctl --user start amber-hunter` |
-| Windows | Configured automatically by install.sh via schtasks |
-
----
-
-## Config & Storage
-
-- `~/.amber-hunter/config.json` — API key, Huper URL, other settings
-- `~/.amber-hunter/hunter.db` — local SQLite (capsules + memory_queue)
-- `~/.amber-hunter/amber-hunter.log` — service log
-- **OS keychain** — stores `master_password`, never written to disk in production
+| Feature | macOS | Linux | Windows |
+|---------|-------|-------|---------|
+| amber-hunter service | ✅ LaunchAgent | ✅ systemd | ✅ Planned |
+| Keychain storage | ✅ security CLI | ✅ secret-tool / config.json | ✅ cmdkey |
+| Semantic search | ✅ | ✅ | ✅ |
+| Proactive capture | ✅ | ✅ | ❌ |
+| `/freeze` session | ✅ | ✅ | ❌ |
 
 ---
 
@@ -305,10 +278,6 @@ tail -f ~/.amber-hunter/amber-hunter.log
 # Linux: secret-tool not found
 sudo apt install libsecret-tools        # Ubuntu/Debian
 sudo dnf install libsecret             # Fedora
-sudo pacman -S libsecret               # Arch
-
-# Windows: pywin32 not installed (Credential Manager fallback to config.json)
-pip install pywin32
 
 # Check pending memories
 curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"api_key\"])')"
@@ -318,13 +287,13 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ## Version History
 
-- **v1.2.0** (2026-03-31): **LLM abstraction layer** (`core/llm.py`) — unified interface for MiniMax/OpenAI/Local; auto-detects API key from OpenClaw config. **`/classify` LLM fallback** — keyword matching primary, LLM triggers when results insufficient. **`/rerank` endpoint** — LLM re-ranks recall candidates with relevance scores. **Proactive capture fixes** — session selection by message count (not mtime), filters `.deleted.` files, deduplicates by session_id. Cron path corrected to `~/.openclaw/skills/amber-hunter/proactive/`.
-- **v1.1.9** (2026-03-31): Universal memory taxonomy (8 life categories + tags); `/ingest` endpoint for AI-initiated writes; `memory_queue` table + approve/reject/edit flow; `source_type` + `category` DB fields; dashboard review queue card; ChatGPT GPT Action schema; SKILL.md multi-client guide; `_background_sync()` + 30min periodic scheduler; Private Network Access CORS headers.
-- **v0.9.6** (2026-03-28): `/bind-apikey` localhost endpoint; dashboard retry-on-401 token refresh; sync timeout 120s.
-- **v0.9.5** (2026-03-28): amber-proactive V4 — self-contained cron, LLM extraction, 15min interval.
-- **v0.9.2** (2026-03-26): Fix semantic search — sentence-transformers + numpy; remove unused mac-keychain.
-- **v0.9.1** (2026-03-26): Remove hardcoded personal Telegram session ID; generic session capture.
-- **v0.8.4** (2026-03-22): Cross-platform support (macOS/Linux/Windows), E2E encryption, /memories no-auth, Claude Cowork session.
+- **v1.2.8** (2026-04-01): Fix proactive-check.js — filter log lines from session transcript; memo truncation 60→80 chars.
+- **v1.2.4** (2026-04-01): Fix `source_type`/`category` missing in sync payload; `httpx.Client` reuse for sync; `/capsules` limit param; `/memories` new fields.
+- **v1.2.3** (2026-04-01): Fix `/recall` semantic search on full corpus; hybrid mode `0.4×keyword + 0.6×semantic`; `/status` enhanced with capsule_count/queue_pending/last_sync.
+- **v1.2.1** (2026-03-31): LLM abstraction layer (`core/llm.py`); `/rerank` endpoint; `/classify` LLM fallback; proactive session selection by message count.
+- **v1.1.9** (2026-03-31): Universal memory taxonomy (8 life categories); `/ingest` + queue management; `source_type` + `category` fields; ChatGPT GPT Action.
+- **v0.9.5** (2026-03-28): amber-proactive V4 — self-contained cron, LLM extraction.
+- **v0.8.4** (2026-03-22): E2E encryption, cross-platform keychain, `/memories` no-auth.
 
 ---
 
