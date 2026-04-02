@@ -148,6 +148,29 @@ def _get_topics_from_config() -> list[dict]:
     return DEFAULT_TOPICS
 
 
+import json as _json
+
+def _get_llm_config() -> dict:
+    """读取 config.json 中的 llm 配置."""
+    config_path = Path(__file__).parent / "config.json"
+    try:
+        with open(config_path) as f:
+            return _json.load(f).get("llm", {})
+    except:
+        return {"provider": "minimax"}
+
+def _save_llm_config(config: dict):
+    """保存 llm 配置到 config.json."""
+    config_path = Path(__file__).parent / "config.json"
+    try:
+        with open(config_path) as f:
+            full = _json.load(f)
+    except:
+        full = {}
+    full["llm"] = config
+    with open(config_path, "w") as f:
+        _json.dump(full, f, indent=2)
+
 
 def _get_embed_model():
     """懒加载向量模型（all-MiniLM-L6-v2）."""
@@ -704,7 +727,7 @@ def recall_memories(
     q: str = "",
     limit: int = 3,
     mode: str = "auto",
-    rerank: bool = False,
+    rerank: bool = True,
     authorization: str = Header(None),
 ):
     """
@@ -714,7 +737,7 @@ def recall_memories(
       q: 搜索查询（用户当前消息）
       limit: 返回记忆数量（默认 3）
       mode: keyword | semantic | auto/hybrid（默认 auto）
-      rerank: 是否用 LLM 重排序（默认 False）
+      rerank: 是否用 LLM 重排序（默认 True）
 
     v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
     """
@@ -1421,6 +1444,45 @@ def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = 
     if cfg_in.auto_sync is not None:
         set_config("auto_sync", "true" if cfg_in.auto_sync else "false")
     return JSONResponse({"ok": True}, headers=add_cors_headers(request))
+
+@app.get("/config/llm")
+async def get_llm_config(request: Request, authorization: str = Header(None)):
+    """获取当前 LLM provider 配置（不返回 api_key 明文）"""
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+    config = _get_llm_config()
+    safe_config = {
+        "provider": config.get("provider", "minimax"),
+        "model": config.get("model", ""),
+        "base_url": config.get("base_url", ""),
+    }
+    return JSONResponse(safe_config, headers=add_cors_headers(request))
+
+@app.put("/config/llm")
+async def update_llm_config(request: Request, authorization: str = Header(None)):
+    """更新 LLM provider 配置"""
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    verify_token(raw_token)
+    body = await request.get_json()
+    provider = body.get("provider")
+    model = body.get("model")
+    if provider not in ("minimax", "openai", "claude", "local"):
+        return JSONResponse({"error": "invalid provider"}, status_code=400)
+    config = _get_llm_config()
+    if provider:
+        config["provider"] = provider
+    if model:
+        config["model"] = model
+    _save_llm_config(config)
+    return JSONResponse({"ok": True, "provider": config.get("provider")}, headers=add_cors_headers(request))
 
 # ── master_password 设置（Dashboard 用）────────────────
 from pydantic import BaseModel
