@@ -9,12 +9,14 @@ Usage:
 
     llm = get_llm()
     response = llm.complete("Your prompt here")
-    response = llm.complete_json("Extract JSON", schema=...)
+    response = llm.acomplete("Your prompt here")  # async version
+    response = llm.complete_json("Extract JSON")
 """
 
+import asyncio
 import json
 import os
-import time
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -32,7 +34,8 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = ""
     timeout: float = 30.0
-    max_tokens: int = 4096
+    max_tokens: int = 2048
+    temperature: float = 0.3  # 0.0~1.0, default 0.3
 
     @classmethod
     def from_dict(cls, d: dict) -> "LLMConfig":
@@ -42,7 +45,8 @@ class LLMConfig:
             api_key=d.get("api_key", ""),
             base_url=d.get("base_url", ""),
             timeout=float(d.get("timeout", 30.0)),
-            max_tokens=int(d.get("max_tokens", 4096)),
+            max_tokens=int(d.get("max_tokens", 2048)),
+            temperature=float(d.get("temperature", 0.3)),
         )
 
     def to_dict(self) -> dict:
@@ -53,6 +57,7 @@ class LLMConfig:
             "base_url": self.base_url,
             "timeout": self.timeout,
             "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
         }
 
 
@@ -67,25 +72,49 @@ class LLMProvider(ABC):
         self.config = config
 
     @abstractmethod
-    def complete(self, prompt: str, system: str = None, max_tokens: int = None) -> str:
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
         """
-        Return text completion. Should handle errors gracefully.
-        Returns error message string on failure (starts with [ERROR]).
+        Return text completion (synchronous).
+        Should handle errors gracefully — returns error message string on failure.
         """
 
+    async def acomplete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        """
+        Async version of complete(). Default implementation wraps sync complete()
+        via asyncio.to_thread() — simple and effective for I/O-bound curl calls.
+        """
+        return await asyncio.to_thread(
+            self.complete, prompt, system, max_tokens, temperature
+        )
+
     @abstractmethod
-    def complete_json(self, prompt: str, system: str = None, schema: dict = None) -> dict:
+    def complete_json(self, prompt: str, system: str = None) -> dict:
         """
         Return JSON-serializable dict.
         Returns {"error": "...", "raw": "..."} on failure.
         """
 
     @abstractmethod
-    def name(self) -> str:
+    def provider_name(self) -> str:
         """Provider name for logging."""
 
+    # Alias for backward compat
+    name = provider_name
+
     def _error(self, msg: str) -> str:
-        return f"[ERROR:{self.name()}] {msg}"
+        return f"[ERROR:{self.provider_name()}] {msg}"
 
     def _json_error(self, msg: str, raw: str = "") -> dict:
         return {"error": msg, "raw": raw}
@@ -100,17 +129,20 @@ class MiniMaxProvider(LLMProvider):
 
     DEFAULT_URL = "https://api.minimaxi.com/anthropic/v1/messages"
 
-    def name(self) -> str:
+    def provider_name(self) -> str:
         return "minimax"
 
-    def complete(self, prompt: str, system: str = None, max_tokens: int = None) -> str:
-        import subprocess
-
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
         if not self.config.api_key:
             return self._error("No API key configured")
 
         base_url = self.config.base_url or self.DEFAULT_URL
-        max_tokens = max_tokens or self.config.max_tokens
 
         system_prompt = system or (
             "You are a helpful AI assistant. "
@@ -120,6 +152,7 @@ class MiniMaxProvider(LLMProvider):
         payload = {
             "model": self.config.model,
             "max_tokens": max_tokens,
+            "temperature": temperature,
             "system": system_prompt,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -133,7 +166,9 @@ class MiniMaxProvider(LLMProvider):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.timeout)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.config.timeout
+            )
             if result.returncode != 0:
                 return self._error(f"curl exit {result.returncode}: {result.stderr[:100]}")
 
@@ -143,7 +178,11 @@ class MiniMaxProvider(LLMProvider):
 
             content = data.get("content", [])
             if isinstance(content, list):
-                text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text")
+                text = "\n".join(
+                    block.get("text", "")
+                    for block in content
+                    if block.get("type") == "text"
+                )
             else:
                 text = str(content)
 
@@ -156,18 +195,18 @@ class MiniMaxProvider(LLMProvider):
         except Exception as e:
             return self._error(str(e))
 
-    def complete_json(self, prompt: str, system: str = None, schema: dict = None) -> dict:
-        """Return parsed JSON. Attempts JSON.parse of complete() output."""
+    def complete_json(self, prompt: str, system: str = None) -> dict:
         text = self.complete(prompt, system)
         if text.startswith("[ERROR"):
             return self._json_error(text)
 
         try:
-            # Strip markdown code blocks if present
             cleaned = text.strip()
             if cleaned.startswith("```"):
                 lines = cleaned.split("\n")
-                cleaned = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+                cleaned = "\n".join(
+                    lines[1:] if lines[0].startswith("```") else lines
+                )
                 if cleaned.endswith("```"):
                     cleaned = cleaned[:-3]
             return json.loads(cleaned)
@@ -184,17 +223,20 @@ class OpenAIProvider(LLMProvider):
 
     DEFAULT_URL = "https://api.openai.com/v1/chat/completions"
 
-    def name(self) -> str:
+    def provider_name(self) -> str:
         return "openai"
 
-    def complete(self, prompt: str, system: str = None, max_tokens: int = None) -> str:
-        import subprocess
-
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
         if not self.config.api_key:
             return self._error("No API key configured")
 
         base_url = self.config.base_url or self.DEFAULT_URL
-        max_tokens = max_tokens or self.config.max_tokens
 
         messages = []
         if system:
@@ -205,7 +247,7 @@ class OpenAIProvider(LLMProvider):
             "model": self.config.model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.3,
+            "temperature": temperature,
         }
 
         cmd = [
@@ -217,7 +259,9 @@ class OpenAIProvider(LLMProvider):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.timeout)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.config.timeout
+            )
             if result.returncode != 0:
                 return self._error(f"curl exit {result.returncode}")
 
@@ -233,7 +277,109 @@ class OpenAIProvider(LLMProvider):
         except Exception as e:
             return self._error(str(e))
 
-    def complete_json(self, prompt: str, system: str = None, schema: dict = None) -> dict:
+    def complete_json(self, prompt: str, system: str = None) -> dict:
+        text = self.complete(prompt, system)
+        if text.startswith("[ERROR"):
+            return self._json_error(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            return self._json_error(f"JSON parse failed: {e}", raw=text[:500])
+
+
+# ---------------------------------------------------------------------------
+# Claude Provider (NEW — Phase 1)
+# ---------------------------------------------------------------------------
+
+class ClaudeProvider(LLMProvider):
+    """
+    Anthropic Claude API.
+    Model: claude-3-5-haiku-20241022 (fast, cheap).
+    API: https://api.anthropic.com/v1/messages
+    """
+
+    DEFAULT_URL = "https://api.anthropic.com/v1/messages"
+    DEFAULT_MODEL = "claude-3-5-haiku-20241022"
+
+    def provider_name(self) -> str:
+        return "claude"
+
+    def _build_payload(
+        self,
+        prompt: str,
+        system: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict:
+        model = self.config.model or self.DEFAULT_MODEL
+        return {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system or "",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+    def _headers(self) -> dict:
+        return {
+            "x-api-key": self.config.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+    def _call_api(self, payload: dict) -> str:
+        base_url = self.config.base_url or self.DEFAULT_URL
+
+        cmd = [
+            "curl", "-s", "--ipv4",
+            "-X", "POST", base_url,
+            "-H", f"x-api-key: {self.config.api_key}",
+            "-H", "anthropic-version: 2023-06-01",
+            "-H", "content-type: application/json",
+            "-d", json.dumps(payload),
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=self.config.timeout
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"curl exit {result.returncode}: {result.stderr[:100]}")
+
+        data = json.loads(result.stdout)
+
+        # Anthropic error format
+        if "error" in data:
+            raise RuntimeError(str(data["error"]))
+
+        # Claude returns: { "content": [{ "type": "text", "text": "..." }] }
+        content = data.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if block.get("type") == "text":
+                    return block.get("text", "").strip()
+        return ""
+
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        if not self.config.api_key:
+            return self._error("No API key configured")
+
+        try:
+            payload = self._build_payload(prompt, system, max_tokens, temperature)
+            return self._call_api(payload)
+        except json.JSONDecodeError:
+            return self._error("Invalid JSON response from Claude API")
+        except subprocess.TimeoutExpired:
+            return self._error(f"Timeout after {self.config.timeout}s")
+        except Exception as e:
+            return self._error(str(e))
+
+    def complete_json(self, prompt: str, system: str = None) -> dict:
         text = self.complete(prompt, system)
         if text.startswith("[ERROR"):
             return self._json_error(text)
@@ -252,14 +398,17 @@ class LocalProvider(LLMProvider):
 
     DEFAULT_URL = "http://localhost:11434"
 
-    def name(self) -> str:
+    def provider_name(self) -> str:
         return "local"
 
-    def complete(self, prompt: str, system: str = None, max_tokens: int = None) -> str:
-        import subprocess
-
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
         base_url = self.config.base_url or self.DEFAULT_URL
-        max_tokens = max_tokens or self.config.max_tokens
 
         messages = []
         if system:
@@ -272,7 +421,7 @@ class LocalProvider(LLMProvider):
             "stream": False,
             "options": {
                 "num_predict": max_tokens,
-                "temperature": 0.3,
+                "temperature": temperature,
             }
         }
 
@@ -284,7 +433,9 @@ class LocalProvider(LLMProvider):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.timeout)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.config.timeout
+            )
             if result.returncode != 0:
                 return self._error(f"curl exit {result.returncode}")
 
@@ -298,7 +449,7 @@ class LocalProvider(LLMProvider):
         except Exception as e:
             return self._error(str(e))
 
-    def complete_json(self, prompt: str, system: str = None, schema: dict = None) -> dict:
+    def complete_json(self, prompt: str, system: str = None) -> dict:
         text = self.complete(prompt, system)
         if text.startswith("[ERROR"):
             return self._json_error(text)
@@ -318,6 +469,7 @@ LLM_AVAILABLE = True
 _PROVIDERS = {
     "minimax": MiniMaxProvider,
     "openai": OpenAIProvider,
+    "claude": ClaudeProvider,  # Phase 1: NEW
     "local": LocalProvider,
 }
 
@@ -330,7 +482,12 @@ def get_llm(config: LLMConfig = None) -> LLMProvider:
     if config is None:
         config = load_llm_config()
 
-    provider_class = _PROVIDERS.get(config.provider, MiniMaxProvider)
+    # Support aliases: "ollama" → LocalProvider
+    provider_key = config.provider.lower()
+    if provider_key in ("ollama",):
+        provider_key = "local"
+
+    provider_class = _PROVIDERS.get(provider_key, MiniMaxProvider)
     return provider_class(config)
 
 
@@ -382,7 +539,6 @@ def load_llm_config() -> LLMConfig:
             pass
 
     # 4. OpenClaw config (~/.openclaw/openclaw.json)
-    # Providers are at models.providers (not top-level)
     openclaw_config = os.path.expanduser("~/.openclaw/openclaw.json")
     if os.path.exists(openclaw_config):
         try:
@@ -394,7 +550,6 @@ def load_llm_config() -> LLMConfig:
             oc_key = mc.get("apiKey", "")
             if oc_key and oc_key.startswith("sk-"):
                 base = mc.get("baseUrl", "https://api.minimaxi.com/anthropic")
-                # Ensure /v1/messages suffix
                 if not base.endswith("/messages"):
                     base = base.rstrip("/") + "/v1/messages"
                 return LLMConfig(
