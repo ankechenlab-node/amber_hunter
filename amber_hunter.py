@@ -21,7 +21,8 @@ from core.keychain import (
 from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_synced,
     get_unsynced_capsules, get_config, set_config,
     queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update,
-    insert_memory_hit, update_capsule_hit)
+    insert_memory_hit, update_capsule_hit,
+    save_tag_feedback, get_tag_feedback)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY
@@ -275,6 +276,9 @@ _MEMORY_EXTRACT_USER = """Extract structured memories from this conversation:
 
 {conversation}
 
+Existing tags in this user's memory (avoid duplicates, prefer more specific):
+{existing_tags}
+
 Return exactly this JSON format:
 {{
   "memories": [
@@ -288,6 +292,86 @@ Return exactly this JSON format:
     }}
   ]
 }}"""
+
+
+def _get_existing_tag_context(limit: int = 20) -> str:
+    """获取现有标签样本 + 用户修正历史，用于引导 LLM 生成不同标签"""
+    db_path = Path.home() / ".amber-hunter" / "hunter.db"
+    all_tags = set()
+
+    if db_path.exists():
+        conn = sqlite3.connect(str(db_path))
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT tags FROM capsules ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+        for (tags,) in rows:
+            for t in (tags or "").split(","):
+                t = t.strip()
+                if t and not t.startswith("#"):
+                    all_tags.add(t.lower())
+
+    # 加入用户修正反馈（用户改过的标签 → 优先用修正后的）
+    import json as _json
+    feedback_tags = set()
+    if db_path.exists():
+        conn = sqlite3.connect(str(DB_PATH))
+        c = conn.cursor()
+        fb_rows = c.execute(
+            "SELECT value FROM config WHERE key LIKE 'tag_feedback:%'"
+        ).fetchall()
+        conn.close()
+        for (val,) in fb_rows:
+            try:
+                corrections = _json.loads(val)
+                for corr in corrections:
+                    feedback_tags.add(corr)
+            except Exception:
+                pass
+
+    combined = all_tags | feedback_tags
+    return ", ".join(sorted(combined)) if combined else "（无）"
+
+
+def _normalize_tag(tag: str) -> str:
+    """标签归一化：小写化空格 trim，同义词映射"""
+    tag = tag.strip().lower()
+    SYNONYMS = {
+        "py": "python", "js": "javascript",
+        "ml": "ai", "llm": "ai",
+        "kecheng": "course", "shu": "book", "book": "book",
+        "react": "react", "vue": "vue", "angular": "angular",
+        "postgres": "postgresql", "postgres": "postgresql",
+        "pg": "postgresql",
+    }
+    return SYNONYMS.get(tag, tag)
+
+
+def _parse_hierarchical_tag(tag: str) -> tuple[str, str]:
+    """返回 (prefix, value)，如 'project:huper' -> ('project', 'huper')"""
+    if ":" in tag:
+        parts = tag.split(":", 1)
+        return parts[0].strip(), parts[1].strip()
+    return "", tag
+
+
+def _normalize_tags(tags_str: str) -> str:
+    """对逗号分隔的标签字符串做归一化处理"""
+    if not tags_str:
+        return tags_str
+    parts = []
+    for t in tags_str.split(","):
+        t = t.strip()
+        if not t:
+            continue
+        # 去掉 # 前缀（如果有）
+        if t.startswith("#"):
+            t = t[1:]
+        normalized = _normalize_tag(t)
+        if normalized:
+            parts.append(normalized)
+    return ",".join(parts)
 
 
 def _llm_extract_memories(text: str) -> list[dict]:
@@ -307,7 +391,8 @@ def _llm_extract_memories(text: str) -> list[dict]:
         if not llm.config.api_key:
             return []
 
-        user_prompt = _MEMORY_EXTRACT_USER.format(conversation=text[:6000])
+        existing_tags = _get_existing_tag_context()
+        user_prompt = _MEMORY_EXTRACT_USER.format(conversation=text[:6000], existing_tags=existing_tags)
         raw = llm.acomplete(user_prompt, system=_MEMORY_EXTRACT_SYSTEM,
                              max_tokens=1024, temperature=0.3)
         if raw.startswith("[ERROR"):
@@ -326,6 +411,19 @@ def _llm_extract_memories(text: str) -> list[dict]:
 
         # Filter: only importance >= 0.6
         filtered = [m for m in memories if isinstance(m, dict) and m.get("importance", 0) >= 0.6]
+        # Normalize tags in each memory (dedup + lowercase + synonym)
+        for m in filtered:
+            raw_tags = m.get("tags", [])
+            if isinstance(raw_tags, list):
+                normalized = [_normalize_tag(t) for t in raw_tags]
+                # Remove duplicates while preserving order
+                seen = set()
+                unique = []
+                for t in normalized:
+                    if t and t not in seen:
+                        seen.add(t)
+                        unique.append(t)
+                m["tags"] = unique[:4]  # max 4 tags
         # Sort by importance desc, keep top 10
         filtered.sort(key=lambda x: x.get("importance", 0), reverse=True)
         return filtered[:10]
@@ -1237,9 +1335,10 @@ def ingest_memory(body: IngestIn, request: Request = None,
     # ── 首次 ingest：引导体验 + 样例记忆 ─────────────────────
     capsule_count = _get_capsule_count()
     is_first_ingest = (capsule_count == 0)
-    final_tags = body.tags
+    final_tags = _normalize_tags(body.tags) if body.tags else ""
     if body.agent_tag:
-        final_tags = f"{body.tags} #{body.agent_tag}" if body.tags else f"#{body.agent_tag}"
+        agent_part = _normalize_tags(body.agent_tag)
+        final_tags = f"{final_tags},agent:{agent_part}" if final_tags else f"agent:{agent_part}"
 
     if is_first_ingest:
         # 先插入3条样例记忆（仅首次）
@@ -1392,6 +1491,19 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
     final_memo = body.memo or item["memo"]
     final_category = body.category or item["category"]
     final_tags = body.tags or item["tags"]
+
+    # 检测用户是否修正了标签，记录反馈
+    if body.tags and body.tags != item.get("tags", ""):
+        original_tags = (item.get("tags") or "").split(",")
+        new_tags = body.tags.split(",")
+        for ot in original_tags:
+            ot = ot.strip()
+            if not ot:
+                continue
+            for nt in new_tags:
+                nt = nt.strip()
+                if nt and nt != ot:
+                    save_tag_feedback(ot, nt)
 
     queue_update(qid, final_memo, final_category, final_tags)
     cap_id = secrets.token_hex(8)

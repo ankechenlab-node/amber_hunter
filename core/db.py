@@ -261,6 +261,35 @@ def set_config(key: str, value: str):
     conn.close()
 
 
+def save_tag_feedback(original_tag: str, corrected_tag: str) -> None:
+    """记录用户修正过的标签对，用于引导后续标签生成"""
+    import json as _json
+    key = f"tag_feedback:{original_tag.lower()}"
+    existing = get_config(key)
+    corrections = []
+    if existing:
+        try:
+            corrections = _json.loads(existing)
+        except Exception:
+            corrections = []
+    if corrected_tag.lower() not in corrections:
+        corrections.append(corrected_tag.lower())
+    set_config(key, _json.dumps(corrections))
+
+
+def get_tag_feedback(original_tag: str) -> list:
+    """获取某标签的用户修正历史"""
+    import json as _json
+    key = f"tag_feedback:{original_tag.lower()}"
+    val = get_config(key)
+    if not val:
+        return []
+    try:
+        return _json.loads(val)
+    except Exception:
+        return []
+
+
 # ── memory_hits — hit tracking v1.2.8 ──────────────────────────────
 
 def insert_memory_hit(
