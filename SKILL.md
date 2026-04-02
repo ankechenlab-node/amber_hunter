@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.8 | 2026-04-01
+> Version: 1.2.9 | 2026-04-03
 
 ---
 
@@ -96,7 +96,7 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 
 ---
 
-## API Endpoints (v1.2.8)
+## API Endpoints (v1.2.9)
 
 ### Core
 
@@ -135,6 +135,8 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 | `/queue/{id}/approve` | POST | Bearer / ?token= | Accept → writes to capsules |
 | `/queue/{id}/reject` | POST | Bearer / ?token= | Dismiss → status=rejected |
 | `/queue/{id}/edit` | POST | Bearer / ?token= | Edit then accept → writes modified to capsules |
+| `/-review` | GET | Bearer / ?token= | Terminal-friendly queue list (v1.2.9) |
+| `/-review/{qid}` | POST | Bearer / ?token= | approve/reject queue item from CLI (v1.2.9) |
 
 ### Session Context (proactive capture)
 
@@ -174,7 +176,8 @@ Content-Type: application/json
   "tags": "decided,database",
   "source": "claude_cowork",
   "confidence": 0.9,
-  "review_required": true
+  "review_required": true,
+  "agent_tag": "openclaw"    // v2.0.0: optional, adds #agent:openclaw tag for color-coding in UI
 }
 ```
 
@@ -185,6 +188,9 @@ Content-Type: application/json
 
 // Written directly (confidence≥0.95 and review_required=false):
 {"queued": false, "capsule_id": "xyz456", "category": "decision", "source_type": "ingest"}
+
+// First ingest (capsule_count==0, v2.0.0):
+{"queued": false, "capsule_id": "xyz456", "welcome": true, "message": "这是你的第一条记忆！...", "sample_count": 3}
 ```
 
 ---

@@ -1,3 +1,17 @@
+## [v1.2.9] — 2026-04-03
+
+### Added
+- **Recall 可解释性** — `/recall` 返回 `breakdown`（keyword/semantic/recency/hotness 分项分值）+ `reason`（中文说明）+ `related_ids`（相关记忆）
+- **首次 ingest 引导** — `capsule_count==0` 时自动插入3条样例记忆，直接写入不进队列，返回 `welcome=true`
+- **内联队列审阅** — `GET /-review` 终端友好列表，`POST /-review/{qid}?action=approve|reject` CLI 快速审阅
+- **相关记忆关联** — 基于关键词重叠计算 related_ids，recall 结果附带相关记忆 ID 列表
+- **Agent 标签** — `POST /ingest` 支持 `agent_tag` 字段，自动追加 `#agent:{tag}` 标签，供前端颜色区分
+
+### Changed
+- **Recall 权重调整** — 混合评分从 `0.4*kw + 0.6*sem` 改为 `0.35*kw + 0.40*sem + 0.15*recency + 0.10*hotness`
+
+---
+
 ## [v1.2.8] — 2026-04-01
 
 ### Fixed

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.8
+Amber-Hunter v1.2.9
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -402,7 +402,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.8")
+app = FastAPI(title="Amber Hunter", version="1.2.9")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -836,29 +836,70 @@ def recall_memories(
                 )
             search_mode = "keyword"
 
-    # ── 混合评分 + 排序 ───────────────────────────
+    # ── 混合评分 + 排序（含 recency/hotness）────────────────
+    now_ts = time.time()
     combined = []
     for kw_n, cap in kw_norm:
         sem = sem_scores.get(cap["id"], 0.0)
+        # 时间衰减：90天完全衰减到 0.37
+        days_old = (now_ts - cap.get("created_at", now_ts)) / 86400
+        recency = max(0.0, 1.0 - days_old / 90)
+        # 热力值：已有 hit 数据用于加权
+        hotness = min(1.0, cap.get("hotness_score", 0) / 10)
         if search_mode == "hybrid":
-            final = 0.4 * kw_n + 0.6 * sem
+            final = 0.35 * kw_n + 0.40 * sem + 0.15 * recency + 0.10 * hotness
         elif search_mode == "semantic":
-            final = sem
+            final = 0.70 * sem + 0.20 * recency + 0.10 * hotness
         else:
-            final = kw_n
-        combined.append((final, cap))
+            final = 0.80 * kw_n + 0.15 * recency + 0.05 * hotness
+        combined.append((final, kw_n, sem, recency, hotness, cap))
 
     # 过滤掉完全无信号的结果
     if search_mode == "keyword":
-        combined = [(s, c) for s, c in combined if s > 0]
+        combined = [(s, kw_n, sem, r, h, c) for s, kw_n, sem, r, h, c in combined if s > 0]
     else:
-        combined = [(s, c) for s, c in combined if s > 0.05]
+        combined = [(s, kw_n, sem, r, h, c) for s, kw_n, sem, r, h, c in combined if s > 0.05]
 
     combined.sort(key=lambda x: x[0], reverse=True)
     top = combined[:limit]
 
+    # ── 相关记忆关联（v1.2.8）──────────────────────────────
+    def _keyword_overlap(words1: set, words2: set) -> float:
+        if not words1 or not words2:
+            return 0.0
+        return len(words1 & words2) / min(len(words1), len(words2))
+
+    def _find_related(cap_id: str, memo: str, tags: str, all_caps: list, top_ids: set, limit: int = 3) -> list:
+        """基于关键词重叠找 top-limit 个相关记忆 ID"""
+        memo_w = set(memo.lower().split())
+        tag_w = set(tags.lower().split())
+        query_w = memo_w | tag_w
+        scores = []
+        for c in all_caps:
+            if c["id"] == cap_id or c["id"] in top_ids:
+                continue
+            c_memo = c.get("memo", "")
+            c_tags = c.get("tags", "")
+            c_w = set(c_memo.lower().split()) | set(c_tags.lower().split())
+            overlap = _keyword_overlap(query_w, c_w)
+            if overlap > 0:
+                scores.append((overlap, c["id"]))
+        scores.sort(key=lambda x: x[0], reverse=True)
+        return [cid for _, cid in scores[:limit]]
+
+    top_ids = {c["id"] for _, _, _, _, _, c in top}
+    related_map: dict[str, list] = {}
+    for _, _, _, _, _, cap in top:
+        memo = cap.get("memo", "") or ""
+        tags = cap.get("tags", "") or ""
+        plain = cap.get("_plain_content", "") or ""
+        try:
+            related_map[cap["id"]] = _find_related(cap["id"], memo + " " + plain, tags, parsed, top_ids)
+        except Exception:
+            related_map[cap["id"]] = []
+
     # ── 组装返回 ─────────────────────────────────
-    def _build_memory(score: float, cap: dict) -> dict:
+    def _build_memory(score: float, kw_n: float, sem: float, recency: float, hotness: float, cap: dict, related_ids: list) -> dict:
         memo = cap.get("memo", "")
         plain = cap.get("_plain_content", "")
         tags = cap.get("tags", "")
@@ -870,6 +911,19 @@ def recall_memories(
             f"记忆：{memo}\n"
             f"内容：{plain[:400]}{'...' if len(plain) > 400 else ''}"
         )
+        # 生成中文 reason
+        parts = []
+        if kw_n > 0.5:
+            parts.append("关键词命中")
+        if sem > 0.5:
+            parts.append("语义相似")
+        if recency > 0.8:
+            parts.append("近期记忆")
+        elif recency < 0.3:
+            parts.append("久远记忆")
+        if hotness > 0.6:
+            parts.append("高热记忆")
+        reason = "、".join(parts) if parts else "综合相关"
         return {
             "id":              cap["id"],
             "memo":            memo,
@@ -879,11 +933,19 @@ def recall_memories(
             "source_type":     cap.get("source_type", ""),
             "created_at":      created,
             "relevance_score": round(score, 3),
+            "breakdown": {
+                "keyword_score": round(kw_n, 3),
+                "semantic_score": round(sem, 3),
+                "recency_score": round(recency, 3),
+                "hotness_score": round(hotness, 3),
+            },
+            "related_ids":     related_ids,
+            "reason":          reason,
             "injected_prompt": injected,
-            "hit_url":         f"/recall/{cap['id']}/hit",  # v1.2.8: hit tracking
+            "hit_url":         f"/recall/{cap['id']}/hit",
         }
 
-    memories = [_build_memory(s, c) for s, c in top]
+    memories = [_build_memory(s, kw_n, sem, r, h, c, related_map.get(c["id"], [])) for s, kw_n, sem, r, h, c in top]
 
     # 清理解密明文
     del parsed
@@ -1107,13 +1169,55 @@ class IngestIn(BaseModel):
     source: str = "unknown"
     confidence: float = 0.7
     review_required: bool = True
+    agent_tag: str = ""  # v1.2.8: agent标识标签，如 "agent:openclaw"
+
+
+def _get_capsule_count() -> int:
+    """获取当前胶囊数量"""
+    db_path = Path.home() / ".amber-hunter" / "hunter.db"
+    if not db_path.exists():
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    c = conn.cursor()
+    row = c.execute("SELECT COUNT(*) FROM capsules").fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def _insert_sample_memories() -> None:
+    """首次启动时插入3条示例记忆（仅执行一次）"""
+    samples = [
+        ("我偏好简洁的解决方案，会拒绝过度工程化",
+         "展示偏好类记忆的用途", "preference", "python, architecture"),
+        ("我主要使用 Python 和 JavaScript 开发",
+         "展示技能类记忆的用途", "skill", "python, javascript"),
+        ("我和 Anke 合作 huper 项目，用 huper 管理项目记忆",
+         "展示项目类记忆的用途", "project", "huper, anke"),
+    ]
+    now = time.time()
+    for memo, content, cat, tags in samples:
+        cap_id = secrets.token_hex(8)
+        insert_capsule(
+            capsule_id=cap_id,
+            memo=memo,
+            content=content,
+            tags=f"#sample {tags}",
+            session_id=None,
+            window_title=None,
+            url=None,
+            created_at=now,
+            source_type="sample",
+            category=cat,
+        )
+        now += 0.01  # 避免时间戳完全相同
 
 
 @app.post("/ingest")
 def ingest_memory(body: IngestIn, request: Request = None,
                   authorization: str = Header(None)):
     """
-    AI 主动写入记忆端点（v1.1.9）。
+    AI 主动写入记忆端点（v1.2.8）。
+    - capsule_count==0 → 首次体验引导，直接写入并返回 welcome
     - review_required=False 且 confidence>=0.95 → 直接写入 capsules
     - 其余 → 写入 memory_queue 等待用户审核
     支持 Bearer header 或 ?token= query param。
@@ -1130,6 +1234,38 @@ def ingest_memory(body: IngestIn, request: Request = None,
     # 推断缺失的 category
     category = body.category or _infer_category(body.memo + " " + body.context)
 
+    # ── 首次 ingest：引导体验 + 样例记忆 ─────────────────────
+    capsule_count = _get_capsule_count()
+    is_first_ingest = (capsule_count == 0)
+    final_tags = body.tags
+    if body.agent_tag:
+        final_tags = f"{body.tags} #{body.agent_tag}" if body.tags else f"#{body.agent_tag}"
+
+    if is_first_ingest:
+        # 先插入3条样例记忆（仅首次）
+        _insert_sample_memories()
+        # 强制直接写入，不进队列
+        cap_id = secrets.token_hex(8)
+        insert_capsule(
+            capsule_id=cap_id,
+            memo=body.memo,
+            content="",
+            tags=final_tags,
+            session_id=None,
+            window_title=None,
+            url=None,
+            created_at=time.time(),
+            source_type="ai_chat",
+            category=category,
+        )
+        return JSONResponse({
+            "queued": False,
+            "capsule_id": cap_id,
+            "welcome": True,
+            "message": "这是你的第一条记忆！试着问我一些问题来验证它的效果。",
+            "sample_count": 3,
+        }, headers=h)
+
     # 高置信度直接写入
     if not body.review_required and body.confidence >= 0.95:
         cap_id = secrets.token_hex(8)
@@ -1137,7 +1273,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
             capsule_id=cap_id,
             memo=body.memo,
             content="",
-            tags=body.tags,
+            tags=final_tags,
             session_id=None,
             window_title=None,
             url=None,
@@ -1153,7 +1289,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
         memo=body.memo,
         context=body.context,
         category=category,
-        tags=body.tags,
+        tags=final_tags,
         source=body.source,
         confidence=body.confidence,
     )
@@ -1272,6 +1408,94 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
         category=final_category,
     )
     return JSONResponse({"capsule_id": cap_id, "message": "Edited and saved"}, headers=h)
+
+
+# ── /-review 端点（v1.2.8 — 终端友好队列审阅）────────────────
+
+@app.get("/-review")
+def review_queue(request: Request = None, authorization: str = Header(None)):
+    """
+    终端友好的待审核记忆列表。
+    curl "http://localhost:18998/-review?token=$TOKEN"
+    """
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+
+    pending = queue_list_pending()
+    if not pending:
+        return JSONResponse({"lines": ["📋 待审阅记忆 (0条)"], "count": 0}, headers=h)
+
+    lines = [f"📋 待审阅记忆 ({len(pending)}条)\n"]
+    for i, item in enumerate(pending, 1):
+        memo = item.get("memo", "")[:60]
+        tags = item.get("tags", "") or "无标签"
+        conf = item.get("confidence", 0)
+        cat = item.get("category", "") or "general"
+        ctx = item.get("context", "")[:80]
+
+        emoji = "💭" if cat == "preference" else "🎯" if cat == "decision" else "📖"
+        lines.append(f"[{i}] {emoji} \"{memo}\"")
+        lines.append(f"   标签: {tags} | 置信度: {conf:.2f}")
+        if ctx:
+            lines.append(f"   上下文: {ctx}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("操作: curl -X POST \"/-review/{id}?action=approve&token=$TOKEN\"")
+    lines.append("     curl -X POST \"/-review/{id}?action=reject&token=$TOKEN\"")
+
+    return JSONResponse({"lines": lines, "count": len(pending), "items": pending}, headers=h)
+
+
+@app.post("/-review/{qid}")
+def review_item(qid: str, request: Request = None, authorization: str = Header(None)):
+    """
+    审阅单个队列项（approve / reject / edit）。
+    curl -X POST "http://localhost:18998/-review/abc123?action=approve&token=$TOKEN"
+    curl -X POST "http://localhost:18998/-review/abc123?action=reject&token=$TOKEN"
+    """
+    raw_token = request.query_params.get("token") if request else None
+    if raw_token:
+        raw_token = f"Bearer {raw_token}"
+    else:
+        raw_token = authorization
+    verify_token(raw_token)
+    h = add_cors_headers(request) if request else {}
+
+    action = request.query_params.get("action") if request else None
+    if action not in ("approve", "reject"):
+        return JSONResponse({"error": "action must be approve or reject"}, status_code=400, headers=h)
+
+    item = queue_get(qid)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404, headers=h)
+    if item["status"] != "pending":
+        return JSONResponse({"error": "already processed"}, status_code=400, headers=h)
+
+    if action == "approve":
+        cap_id = secrets.token_hex(8)
+        insert_capsule(
+            capsule_id=cap_id,
+            memo=item["memo"],
+            content="",
+            tags=item["tags"],
+            session_id=None,
+            window_title=None,
+            url=None,
+            created_at=time.time(),
+            source_type="ai_chat",
+            category=item["category"],
+        )
+        queue_set_status(qid, "approved")
+        return JSONResponse({"capsule_id": cap_id, "action": "approved"}, headers=h)
+    else:
+        queue_set_status(qid, "rejected")
+        return JSONResponse({"qid": qid, "action": "rejected"}, headers=h)
 
 
 # ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
@@ -1575,7 +1799,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.8",
+        "version":            "1.2.9",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -1592,7 +1816,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.8", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.9", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
