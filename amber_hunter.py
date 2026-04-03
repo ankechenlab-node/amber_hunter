@@ -94,6 +94,41 @@ def _infer_category_path(memo: str, content: str = "", tags: str = "") -> str:
     return best_match
 
 
+def backfill_category_paths(dry_run: bool = True) -> dict:
+    """
+    一次性脚本：遍历所有胶囊，填充 category_path。
+    返回归类统计。
+    dry_run=True 时只报告不实际写入。
+    """
+    from core.db import _get_conn
+
+    conn = _get_conn()
+    c = conn.cursor()
+
+    # 只更新 general/default 的胶囊（有明确分类的不动）
+    rows = c.execute(
+        "SELECT id, memo, content, tags, category_path FROM capsules WHERE category_path = 'general/default'"
+    ).fetchall()
+
+    stats = {"total": len(rows), "updated": 0, "by_path": {}}
+    for row in rows:
+        cap_id, memo, content, tags, old_path = row
+        new_path = _infer_category_path(memo or "", content or "", tags or "")
+
+        if new_path != "general/default":
+            if not dry_run:
+                c.execute(
+                    "UPDATE capsules SET category_path = ? WHERE id = ?",
+                    (new_path, cap_id)
+                )
+            stats["updated"] += 1
+            stats["by_path"][new_path] = stats["by_path"].get(new_path, 0) + 1
+
+    if not dry_run:
+        conn.commit()
+
+    return stats
+
 
 # ── 本地轻量标签生成（无需网络/ML，关键词匹配）────────────────────────
 # ── v0.8.9: 可扩展 Topic 分类系统 ─────────────────────────
@@ -1973,6 +2008,23 @@ def get_local_token(request: Request):
     if not token:
         return JSONResponse({"api_key": None}, headers=add_cors_headers(request))
     return JSONResponse({"api_key": token}, headers=add_cors_headers(request))
+
+# ── MFS 路径归类（需认证）────────────────────────────────
+@app.post("/admin/backfill-paths")
+def backfill_paths(request: Request, authorization: str = Header(None), dry_run: bool = True):
+    """
+    批量归类历史胶囊的 category_path。
+    dry_run=true（默认）只报告不写入。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    stats = backfill_category_paths(dry_run=dry_run)
+    return JSONResponse({
+        "dry_run": dry_run,
+        "total_checked": stats["total"],
+        "would_update": stats["updated"],
+        "by_path": stats["by_path"],
+    }, headers=add_cors_headers(request))
 
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
