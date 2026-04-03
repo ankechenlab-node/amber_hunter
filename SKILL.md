@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.13 | 2026-04-03
+> Version: 1.2.15 | 2026-04-03
 
 ---
 

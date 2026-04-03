@@ -1,3 +1,24 @@
+## [v1.2.15] — 2026-04-03
+
+### Fixed
+- **P0-1: `update_capsule` 重置 `synced=0`** — 编辑胶囊后本地修改现在会重新进入待同步队列，修复幽灵同步 bug；`updated_at` 字段同步更新
+- **P0-2: `updated_at` 字段** — 胶囊新增 `updated_at` 列（core/db.py + amber_hunter.py），为云端冲突检测打下基础
+- **P1-4: 同步重试逻辑** — `_do_sync_capsules` 对 5xx 错误最多重试 2 次（指数退避 1s/2s），4xx 和异常立即失败不重试；修复 `elif attempt < 2` 条件在 attempt=2 时错误跳过重试的逻辑 bug
+- **P1-5: `get_unsynced_capsules` 加 `ORDER BY`** — 未同步胶囊按 `created_at ASC` 排序（先老后新），配合批次处理保证顺序一致性
+- **P1-6: 同步并发控制** — `_spawn_sync_if_enabled` 加线程锁（`threading.Lock`），防止多个同步线程同时运行导致重复上传
+- **P1-7: 后台同步异常上报** — `_background_sync` 异常写入 `config.sync_last_error`，`/status` 端点返回 `sync_last_error` 字段
+- **P2-8: `update_capsule` 使用 thread-local 连接** — 改用 `_get_conn()` 复用连接池而非独立 `sqlite3.connect`
+- **P2-9: 同步前网络可达性预检** — 同步前用 `socket.create_connection` 检查 huper.org 443 端口，不可达则立即返回避免无用尝试
+- **P2-10: `get_unsynced_capsules` 加 `ORDER BY created_at ASC`** — 保证胶囊按创建顺序上传
+- **P3-11: `last_sync_at` 独立记录** — 同步完成后用 `set_config("last_sync_at", timestamp)` 而非 `MAX(created_at)`，保证 `last_sync` 时间精确
+
+### Changed
+- **P0-3: `sync_to_cloud` 返回值增强** — 返回 `failed`（失败数）、`partial`（是否有部分失败）、`all_synced`（是否全部成功）字段，Dashboard 可精准展示同步状态
+- **`/status` 端点** — 新增 `sync_last_error` 字段（来自 config 表），Dashboard 可展示最近同步错误
+- **`_do_sync_capsules` 重构** — 简化重试逻辑结构，消除嵌套 for-else歧义；`for attempt in range(3)` 替代 `while` 循环，代码更清晰
+
+---
+
 ## [v1.2.13] — 2026-04-03
 
 ### Added

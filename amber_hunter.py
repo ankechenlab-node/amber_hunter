@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.13
+Amber-Hunter v1.2.15
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
 """
 from __future__ import annotations
 
-import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc, threading, logging
+import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc, threading, logging, traceback
 from pathlib import Path
 from typing import Optional
 
@@ -610,7 +610,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.13")
+app = FastAPI(title="Amber Hunter", version="1.2.15")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -973,11 +973,13 @@ def update_capsule(
         values.append(body.category_path)
 
     if updates:
+        updates.append("synced = 0")       # P0-1: 本地修改后必须重新同步
+        updates.append("updated_at = ?")   # P0-2: 记录更新时间
+        values.append(time.time())
         values.append(capsule_id)
-        conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
+        conn = _get_conn()
         conn.execute(f"UPDATE capsules SET {', '.join(updates)} WHERE id = ?", values)
         conn.commit()
-        conn.close()
 
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
@@ -1822,75 +1824,109 @@ def review_item(qid: str, request: Request = None, authorization: str = Header(N
 # ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
 def _do_sync_capsules(unsynced: list, api_token: str, huper_url: str, master_pw: str) -> dict:
     """
-    核心同步逻辑（v1.2.5）。
+    核心同步逻辑（v1.2.15）。
     - 单个 httpx.Client 复用连接，避免每条胶囊建立新 TCP 连接
     - payload 包含 source_type / category，确保云端字段完整
+    - P1-4: 5xx 最多重试 2 次（指数退避 1s/2s）
+    - P2-9: 网络可达性预检
     - 返回 {"synced": int, "total": int, "errors": list}
     """
     import httpx
+    from urllib.parse import urlparse
+    import socket
+
     synced_count = 0
     errors = []
+
+    # P2-9: 网络可达性预检
+    parsed = urlparse(huper_url)
+    host = parsed.netloc or parsed.path.split("/")[0]
+    try:
+        sock = socket.create_connection((host, 443), timeout=3.0)
+        sock.close()
+    except OSError:
+        return {"synced": 0, "total": len(unsynced),
+                "errors": [{"error": f"network unreachable: {host}"}]}
 
     try:
         with httpx.Client(timeout=15.0, trust_env=False) as client:
             for capsule in unsynced:
-                try:
-                    salt_b64 = capsule.get("salt")
-                    if not salt_b64:
-                        errors.append({"id": capsule["id"], "error": "no salt, skipped"})
-                        continue
+                # ── 准备加密 payload ─────────────────────────────
+                salt_b64 = capsule.get("salt")
+                if not salt_b64:
+                    errors.append({"id": capsule["id"], "error": "no salt, skipped"})
+                    continue
 
-                    salt = base64.b64decode(salt_b64)
-                    key  = derive_key(master_pw, salt)
+                salt = base64.b64decode(salt_b64)
+                key  = derive_key(master_pw, salt)
 
-                    # content 已在本地加密，直接传密文
-                    content_enc   = capsule.get("content") or ""
-                    content_nonce = capsule.get("nonce")   or ""
+                content_enc   = capsule.get("content") or ""
+                content_nonce = capsule.get("nonce")   or ""
 
-                    # memo / tags 在此加密
-                    memo_bytes = (capsule.get("memo") or "").encode("utf-8")
-                    memo_ct, memo_nonce = encrypt_content(memo_bytes, key)
-                    memo_enc       = base64.b64encode(memo_ct).decode()
-                    memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
+                memo_bytes = (capsule.get("memo") or "").encode("utf-8")
+                memo_ct, memo_nonce = encrypt_content(memo_bytes, key)
+                memo_enc       = base64.b64encode(memo_ct).decode()
+                memo_nonce_b64 = base64.b64encode(memo_nonce).decode()
 
-                    tags_bytes = (capsule.get("tags") or "").encode("utf-8")
-                    tags_ct, tags_nonce = encrypt_content(tags_bytes, key)
-                    tags_enc       = base64.b64encode(tags_ct).decode()
-                    tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
+                tags_bytes = (capsule.get("tags") or "").encode("utf-8")
+                tags_ct, tags_nonce = encrypt_content(tags_bytes, key)
+                tags_enc       = base64.b64encode(tags_ct).decode()
+                tags_nonce_b64 = base64.b64encode(tags_nonce).decode()
 
-                    payload = {
-                        "e2e":           True,
-                        "salt":          salt_b64,
-                        "memo_enc":      memo_enc,
-                        "memo_nonce":    memo_nonce_b64,
-                        "content_enc":   content_enc,
-                        "content_nonce": content_nonce,
-                        "tags_enc":      tags_enc,
-                        "tags_nonce":    tags_nonce_b64,
-                        "created_at":    capsule.get("created_at"),
-                        "session_id":    capsule.get("session_id"),
-                        "source_type":   capsule.get("source_type") or "manual",
-                        "category":      capsule.get("category") or "",
-                    }
+                payload = {
+                    "e2e":           True,
+                    "salt":          salt_b64,
+                    "memo_enc":      memo_enc,
+                    "memo_nonce":    memo_nonce_b64,
+                    "content_enc":   content_enc,
+                    "content_nonce": content_nonce,
+                    "tags_enc":      tags_enc,
+                    "tags_nonce":    tags_nonce_b64,
+                    "created_at":    capsule.get("created_at"),
+                    "session_id":    capsule.get("session_id"),
+                    "source_type":   capsule.get("source_type") or "manual",
+                    "category":      capsule.get("category") or "",
+                }
 
-                    resp = client.post(
-                        f"{huper_url}/capsules",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {api_token}"}
-                    )
-
-                    if resp.status_code in (200, 201):
-                        mark_synced(capsule["id"])
-                        synced_count += 1
-                    else:
-                        errors.append({"id": capsule["id"], "status": resp.status_code,
-                                       "body": resp.text[:120]})
-                except Exception as e:
-                    errors.append({"id": capsule["id"], "error": str(e)})
+                # P1-4: 重试逻辑（5xx 最多重试 2 次，指数退避）
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        resp = client.post(
+                            f"{huper_url}/capsules",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {api_token}"}
+                        )
+                        if resp.status_code in (200, 201):
+                            mark_synced(capsule["id"])
+                            synced_count += 1
+                            last_err = None
+                            break
+                        elif resp.status_code >= 500:
+                            # 5xx：还有重试机会则等待后重试
+                            if attempt < 2:
+                                time.sleep(2 ** attempt)
+                                continue
+                            # attempt == 2: 重试耗尽，记录错误
+                            last_err = {"id": capsule["id"], "status": resp.status_code,
+                                        "body": resp.text[:120]}
+                        else:
+                            # 4xx：不可重试，直接记录错误
+                            last_err = {"id": capsule["id"], "status": resp.status_code,
+                                        "body": resp.text[:120]}
+                    except Exception as e:
+                        last_err = {"id": capsule["id"], "error": str(e)}
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                            continue
+                if last_err is not None:
+                    errors.append(last_err)
 
     except Exception as e:
         errors.append({"error": f"httpx init failed: {e}"})
 
+    # P3-11: 同步完成后更新 last_sync_at（无论成功与否）
+    set_config("last_sync_at", str(time.time()))
     return {"synced": synced_count, "total": len(unsynced), "errors": errors}
 
 
@@ -1911,14 +1947,36 @@ def _background_sync() -> dict:
         return result
     except Exception as e:
         logging.error(f"[amber-hunter] _background_sync error: {e}")
+        set_config("sync_last_error", json.dumps({
+            "ts": time.time(), "msg": str(e),
+        }))
         return {"synced": 0, "total": 0, "errors": [str(e)]}
+
+
+# P1-6: 同步并发锁，防止重复并发同步
+_sync_lock = threading.Lock()
 
 
 def _spawn_sync_if_enabled():
     """如果 auto_sync 已启用，在守护线程里执行同步（非阻塞）。"""
     if get_config("auto_sync") == "true":
-        t = threading.Thread(target=_background_sync, daemon=True)
-        t.start()
+        if not _sync_lock.acquire(blocking=False):
+            logging.debug("[amber-hunter] sync already running, skipping")
+            return
+        try:
+            t = threading.Thread(target=_background_sync_locked, daemon=True)
+            t.start()
+        except Exception:
+            _sync_lock.release()
+            raise
+
+
+def _background_sync_locked():
+    """在锁内运行的 _background_sync wrapper，释放锁"""
+    try:
+        _background_sync()
+    finally:
+        _sync_lock.release()
 
 
 @app.get("/sync")
@@ -1946,13 +2004,27 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
         return JSONResponse({"synced": 0, "total": 0, "message": "没有需要同步的胶囊"},
                             headers=add_cors_headers(request))
 
-    result = _do_sync_capsules(unsynced, api_token, huper_url, master_pw)
-    logging.info(f"[amber-hunter] /sync: {result['synced']}/{result['total']}")
+    # P1-5: 分批处理，每批 50 条，避免大量胶囊时超时/内存爆炸
+    BATCH_SIZE = 50
+    total_synced = 0
+    all_errors = []
+    for i in range(0, len(unsynced), BATCH_SIZE):
+        batch = unsynced[i:i + BATCH_SIZE]
+        result = _do_sync_capsules(batch, api_token, huper_url, master_pw)
+        total_synced += result["synced"]
+        all_errors.extend(result["errors"])
+        if i + BATCH_SIZE < len(unsynced):
+            time.sleep(0.3)  # 批次间稍作延迟，避免瞬时过载
+
+    logging.info(f"[amber-hunter] /sync: {total_synced}/{len(unsynced)}")
     h = add_cors_headers(request)
     return JSONResponse({
-        "synced": result["synced"],
-        "total":  result["total"],
-        "errors": result["errors"] or None,
+        "synced": total_synced,
+        "total":  len(unsynced),
+        "failed": len(all_errors),
+        "errors": all_errors[:10] if all_errors else None,
+        "partial": total_synced > 0 and total_synced < len(unsynced),
+        "all_synced": total_synced == len(unsynced),
     }, headers=h)
 
 # ── 配置读取（Dashboard 用）────────────────────────────
@@ -2106,14 +2178,21 @@ def get_status(request: Request):
                 "SELECT COUNT(*) FROM memory_queue WHERE status='pending'"
             ).fetchone()
             db_stats["queue_pending"] = row2[0] if row2 else 0
-            # last_sync: 最近一条已同步胶囊的 created_at（近似值）
-            row3 = _c.execute(
-                "SELECT MAX(created_at) FROM capsules WHERE synced=1"
-            ).fetchone()
-            db_stats["last_sync"] = row3[0] if row3 and row3[0] else None
             _conn.close()
     except Exception:
         pass
+
+    # P3-11: last_sync 改用独立 config 记录（不受 created_at 影响）
+    last_sync_ts = get_config("last_sync_at")
+    db_stats["last_sync"] = float(last_sync_ts) if last_sync_ts else None
+    # P1-7: 同步错误持久化
+    sync_last_err = get_config("sync_last_error")
+    sync_last_error = None
+    if sync_last_err:
+        try:
+            sync_last_error = json.loads(sync_last_err)
+        except Exception:
+            sync_last_error = sync_last_err
 
     return JSONResponse({
         "running":            True,
@@ -2136,6 +2215,7 @@ def get_status(request: Request):
         "capsule_count":      db_stats["capsule_count"],
         "queue_pending":      db_stats["queue_pending"],
         "last_sync":          db_stats["last_sync"],
+        "sync_last_error":   sync_last_error,
     }, headers=h)
 
 @app.get("/")
@@ -2146,7 +2226,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.13 启动")
+    print("🌙 Amber-Hunter v1.2.15 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
