@@ -90,6 +90,21 @@ def init_db():
         )
     """)
 
+    # v1.2.10+: 常用查询索引
+    for index_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_capsules_synced ON capsules(synced)",
+        "CREATE INDEX IF NOT EXISTS idx_capsules_created_at ON capsules(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_capsules_session_id ON capsules(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_capsules_category ON capsules(category)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_queue_status ON memory_queue(status)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_queue_created_at ON memory_queue(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_hits_capsule_id ON memory_hits(capsule_id)",
+    ]:
+        try:
+            c.execute(index_sql)
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
