@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.19
+Amber-Hunter v1.2.20
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -2333,6 +2333,103 @@ def generate_insights(request: Request, authorization: str = Header(None), path:
         "by_path": stats["by_path"],
     }, headers=add_cors_headers(request))
 
+# ── A2: DID 多设备身份 v1.2.20 ─────────────────────────────
+
+@app.post("/did/setup")
+def did_setup(request: Request, authorization: str = Header(None)):
+    """
+    在本设备设置 DID 身份（生成助记词，派生设备密钥）。
+    助记词仅此一次显示，需用户备份。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    from core.crypto import generate_mnemonic, mnemonic_to_master, derive_identity_keypair, derive_device_key, pubkey_to_did, privkey_to_hex, pubkey_to_hex
+
+    # 生成助记词
+    mnemonic = generate_mnemonic(256)
+    # 派生密钥
+    master = mnemonic_to_master(mnemonic, "amber@local")
+    identity_priv, identity_pub = derive_identity_keypair(master)
+    device_uuid = secrets.token_hex(8)
+    device_priv, device_pub = derive_device_key(master, device_uuid)
+    did_str = pubkey_to_did(identity_pub)
+    device_priv_hex = privkey_to_hex(device_priv)
+    device_pub_hex = pubkey_to_hex(device_pub)
+
+    # 保存到本地配置（设备私钥 hex 明文存储，用户需知情）
+    import json
+    did_config = {
+        "did": did_str,
+        "device_id": device_uuid,
+        "device_pub": device_pub_hex,
+        "mnemonic": mnemonic,  # 仅此一次
+    }
+    did_path = HOME / ".amber-hunter" / "did.json"
+    did_path.parent.mkdir(parents=True, exist_ok=True)
+    did_path.write_text(json.dumps(did_config))
+
+    return JSONResponse({
+        "did": did_str,
+        "mnemonic": mnemonic,
+        "device_id": device_uuid,
+    }, headers=add_cors_headers(request))
+
+
+@app.get("/did/status")
+def did_status(request: Request, authorization: str = Header(None)):
+    """查询本设备 DID 身份状态"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    import json
+    did_path = HOME / ".amber-hunter" / "did.json"
+    if not did_path.exists():
+        return JSONResponse({"has_did": False})
+    cfg = json.loads(did_path.read_text())
+    return JSONResponse({
+        "has_did": True,
+        "did": cfg.get("did"),
+        "device_id": cfg.get("device_id"),
+    })
+
+
+@app.post("/did/register-device")
+def did_register_device(request: Request, authorization: str = Header(None)):
+    """
+    将本设备注册到云端 DID（需要云端账户已设置 DID）。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    import json
+    did_path = HOME / ".amber-hunter" / "did.json"
+    if not did_path.exists():
+        return JSONResponse({"error": "请先调用 /did/setup 设置 DID 身份"}, status_code=400)
+
+    cfg = json.loads(did_path.read_text())
+    huper_url = get_huper_url()
+
+    # 调用云端 /api/did/devices/register 注册设备公钥
+    import httpx
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{huper_url}/did/devices/register",
+                json={
+                    "device_id": cfg["device_id"],
+                    "device_pub": cfg["device_pub"],
+                    "did": cfg["did"],
+                },
+                headers={"Authorization": f"Bearer {raw_token}"}
+            )
+        if resp.status_code == 200:
+            return JSONResponse({"ok": True, "device_id": cfg["device_id"]})
+        else:
+            return JSONResponse({"error": f"云端注册失败: {resp.status_code}"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"网络错误: {e}"}, status_code=500)
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2372,7 +2469,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.19",
+        "version":            "1.2.20",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2397,12 +2494,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.18", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.20", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.19 启动")
+    print("🌙 Amber-Hunter v1.2.20 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

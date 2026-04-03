@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.19 | 2026-04-04
+> Version: 1.2.20 | 2026-04-04
 
 ---
 
@@ -147,6 +147,15 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 | `/freeze` | GET/POST | Bearer / ?token= | Capture current dev session context |
 | `/session/summary` | GET | Bearer | Get current session summary |
 | `/session/files` | GET | Bearer | Get open files in current session |
+| `/session/preload` | GET | Bearer | Get preloaded memories for current scene (v1.2.19) |
+
+### DID Identity (v1.2.20 — multi-device)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/did/setup` | POST | Bearer | Generate mnemonic + derive device key → save locally (mnemonic shown once) |
+| `/did/status` | GET | Bearer | Check if local DID identity is configured |
+| `/did/register-device` | POST | Bearer | Register device public key to cloud (cloud account must have DID set up) |
 
 ### Sync & Config
 
