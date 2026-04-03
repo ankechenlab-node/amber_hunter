@@ -976,9 +976,9 @@ def recall_memories(
         for c in all_caps:
             if c["id"] == cap_id or c["id"] in top_ids:
                 continue
-            c_memo = c.get("memo", "")
-            c_tags = c.get("tags", "")
-            c_w = set(c_memo.lower().split()) | set(c_tags.lower().split())
+            c_memo = (c.get("memo") or "").lower()
+            c_tags = (c.get("tags") or "").lower()
+            c_w = set(c_memo.split()) | set(c_tags.split())
             overlap = _keyword_overlap(query_w, c_w)
             if overlap > 0:
                 scores.append((overlap, c["id"]))
