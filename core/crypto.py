@@ -321,3 +321,17 @@ def pubkey_to_hex(pub_key) -> str:
     from cryptography.hazmat.primitives import serialization
     raw = pub_key.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
     return raw.hex()
+
+
+def derive_capsule_key(device_priv_hex: str, capsule_id: str) -> tuple:
+    """
+    从设备私钥（hex）和胶囊 ID 派生胶囊加密密钥。
+    与 did.py 的 derive_capsule_key 等价（本地版本）。
+    返回 (aes_key, mac_key)：aes_key 用于 AES-256-GCM，mac_key 备用。
+    """
+    import hmac as _hmac
+    priv_bytes = bytes.fromhex(device_priv_hex)
+    key = _hmac.new(priv_bytes, ("amber-capsule-key" + capsule_id).encode(), hashlib.sha256).digest()
+    aes_key = key[:32]    # AES-256
+    mac_key = key[32:64]  # HMAC key (备用)
+    return aes_key, mac_key

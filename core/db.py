@@ -69,6 +69,12 @@ def init_db():
         except Exception:
             pass
 
+    # D2: 密钥来源字段（'did' 或 'pbkdf2'）
+    try:
+        c.execute("ALTER TABLE capsules ADD COLUMN key_source TEXT DEFAULT 'pbkdf2'")
+    except Exception:
+        pass
+
     # v1.1.9: AI 提议记忆审核队列
     c.execute("""
         CREATE TABLE IF NOT EXISTS memory_queue (
@@ -181,6 +187,7 @@ def insert_capsule(
     category: str = "",
     category_path: str = "general/default",
     updated_at: float = 0.0,
+    key_source: str = "pbkdf2",
 ) -> bool:
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
@@ -188,11 +195,11 @@ def insert_capsule(
         c.execute("""
             INSERT INTO capsules
               (id,memo,content,tags,session_id,window_title,url,created_at,
-               salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at,key_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (capsule_id, memo, content, tags, session_id, window_title,
               url, created_at, salt, nonce, encrypted_len, content_hash,
-              0, source_type, category, category_path, updated_at or created_at))
+              0, source_type, category, category_path, updated_at or created_at, key_source))
         conn.commit()
         return True
     finally:
@@ -205,14 +212,14 @@ def get_capsule(capsule_id: str) -> dict | None:
     try:
         row = c.execute(
             "SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-            "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at "
+            "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at,key_source "
             "FROM capsules WHERE id=?", (capsule_id,)
         ).fetchone()
         if not row:
             return None
         keys = ["id","memo","content","tags","session_id","window_title","url",
                 "created_at","salt","nonce","encrypted_len","content_hash","synced",
-                "source_type","category","category_path","updated_at"]
+                "source_type","category","category_path","updated_at","key_source"]
         return dict(zip(keys, row))
     finally:
         conn.close()
@@ -261,7 +268,7 @@ def get_unsynced_capsules(limit: int = 0) -> list[dict]:
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
     sql = ("SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-           "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at "
+           "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at,key_source "
            "FROM capsules WHERE synced=0 ORDER BY created_at ASC")
     if limit > 0:
         sql += f" LIMIT {limit}"
@@ -269,7 +276,7 @@ def get_unsynced_capsules(limit: int = 0) -> list[dict]:
     conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","url",
             "created_at","salt","nonce","encrypted_len","content_hash","synced",
-            "source_type","category","category_path","updated_at"]
+            "source_type","category","category_path","updated_at","key_source"]
     return [dict(zip(keys, r)) for r in rows]
 
 

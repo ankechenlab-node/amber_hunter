@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.20
+Amber-Hunter v1.2.22
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -13,7 +13,7 @@ from typing import Optional
 
 # ── 核心模块 ────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from core.crypto import derive_key, encrypt_content, decrypt_content, generate_salt
+from core.crypto import derive_key, encrypt_content, decrypt_content, generate_salt, derive_capsule_key
 from core.keychain import (
     get_master_password, set_master_password,
     get_api_token, get_huper_url,
@@ -652,6 +652,56 @@ def _generate_insight(path: str, capsule_ids: list[str], memos: list[str], hotne
 _auto_tag_local = classify_topics
 
 
+# ── DID 胶囊密钥派生（v1.2.22 D2）────────────────────────
+DID_CONFIG_PATH = Path.home() / ".amber-hunter" / "did.json"
+
+
+def _get_did_encryption_key(capsule_id: str) -> tuple:
+    """
+    获取胶囊加密密钥。
+    优先使用 DID 设备私钥派生；无 DID 身份则回退到 PBKDF2。
+    返回 (aes_key, key_source, salt_or_None)
+    """
+    if DID_CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(DID_CONFIG_PATH.read_text())
+            device_priv = cfg.get("device_priv")
+            if device_priv:
+                aes_key, _ = derive_capsule_key(device_priv, capsule_id)
+                return aes_key, "did", None  # DID 密钥不需要 salt
+        except Exception:
+            pass
+
+    # fallback: PBKDF2
+    master_pw = get_master_password()
+    if not master_pw:
+        raise HTTPException(
+            status_code=401,
+            detail="未设置 master_password，请先在 huper.org/dashboard 配置"
+        )
+    salt = generate_salt()
+    key = derive_key(master_pw, salt)
+    return key, "pbkdf2", salt
+
+
+def _decrypt_with_did(ciphertext_b64: str, nonce_b64: str, capsule_id: str):
+    """尝试使用 DID 设备私钥解密。成功返回明文，失败返回 None。"""
+    if not DID_CONFIG_PATH.exists():
+        return None
+    try:
+        cfg = json.loads(DID_CONFIG_PATH.read_text())
+        device_priv = cfg.get("device_priv")
+        if not device_priv:
+            return None
+        aes_key, _ = derive_capsule_key(device_priv, capsule_id)
+        ct = base64.b64decode(ciphertext_b64)
+        nonce = base64.b64decode(nonce_b64)
+        plaintext = decrypt_content(ct, aes_key, nonce)
+        return plaintext.decode("utf-8") if plaintext else None
+    except Exception:
+        return None
+
+
 from pydantic import BaseModel
 
 HOME = Path.home()
@@ -915,28 +965,22 @@ def list_capsules_handler(
 @app.post("/capsules")
 def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
-    master_pw = get_master_password()
-    if not master_pw:
-        raise HTTPException(
-            status_code=401,
-            detail="未设置 master_password，请先在 huper.org/dashboard 配置"
-        )
 
     capsule_id = secrets.token_hex(8)
     now = time.time()
 
     if capsule.content:
-        # ── 加密 content ──────────────────────────────
-        salt = generate_salt()
-        key = derive_key(master_pw, salt)
-        ciphertext, nonce = encrypt_content(capsule.content.encode("utf-8"), key)
+        # ── 加密 content（DID 优先，PBKDF2 回退）───────
+        aes_key, key_source, salt = _get_did_encryption_key(capsule_id)
+        ciphertext, nonce = encrypt_content(capsule.content.encode("utf-8"), aes_key)
         import hashlib, base64
         content_hash = hashlib.sha256(ciphertext).hexdigest()
-        salt_b64   = base64.b64encode(salt).decode()
+        salt_b64   = base64.b64encode(salt).decode() if salt else None
         nonce_b64  = base64.b64encode(nonce).decode()
         ct_b64     = base64.b64encode(ciphertext).decode()
     else:
         salt_b64 = nonce_b64 = ct_b64 = content_hash = None
+        key_source = "pbkdf2"
         ct_b64 = capsule.content  # 空内容存空字符串
 
     # 本地自动打标签（E2E 架构：标签在本地生成，加密后上传，服务端不处理内容）
@@ -957,6 +1001,7 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), reques
         content_hash=content_hash,
         source_type=getattr(capsule, 'source_type', 'manual'),
         category=getattr(capsule, 'category', '') or _infer_category(capsule.memo or ""),
+        key_source=key_source,
     )
 
     h = add_cors_headers(request) if request else {}
@@ -974,13 +1019,23 @@ def get_capsule_handler(capsule_id: str, authorization: str = Header(None), requ
 
     if record.get("salt") and record.get("nonce") and content:
         import base64
+        key_source = record.get("key_source", "pbkdf2")
         try:
-            salt = base64.b64decode(record["salt"])
-            nonce = base64.b64decode(record["nonce"])
-            ciphertext = base64.b64decode(content)
-            key = derive_key(master_pw, salt)
-            plaintext = decrypt_content(ciphertext, key, nonce)
-            content = plaintext.decode("utf-8") if plaintext else "[解密失败：密钥错误]"
+            # D2: 优先 DID 解密
+            if key_source == "did":
+                plaintext = _decrypt_with_did(content, record["nonce"], capsule_id)
+                if plaintext:
+                    content = plaintext
+                else:
+                    content = "[解密失败：DID 密钥不匹配]"
+            else:
+                # PBKDF2 回退
+                salt = base64.b64decode(record["salt"])
+                nonce = base64.b64decode(record["nonce"])
+                ciphertext = base64.b64decode(content)
+                key = derive_key(master_pw, salt)
+                plaintext = decrypt_content(ciphertext, key, nonce)
+                content = plaintext.decode("utf-8") if plaintext else "[解密失败：密钥错误]"
         except Exception as e:
             content = f"[解密失败：{e}]"
 
@@ -1948,14 +2003,30 @@ def _do_sync_capsules(unsynced: list, api_token: str, huper_url: str, master_pw:
     try:
         with httpx.Client(timeout=15.0, trust_env=False) as client:
             for capsule in unsynced:
-                # ── 准备加密 payload ─────────────────────────────
+                # ── 准备加密 payload（支持 DID key）─────────────
                 salt_b64 = capsule.get("salt")
                 if not salt_b64:
                     errors.append({"id": capsule["id"], "error": "no salt, skipped"})
                     continue
 
-                salt = base64.b64decode(salt_b64)
-                key  = derive_key(master_pw, salt)
+                key_source = capsule.get("key_source", "pbkdf2")
+                if key_source == "did":
+                    # DID 加密胶囊：读取 did.json 派生密钥
+                    did_cfg = {}
+                    if DID_CONFIG_PATH.exists():
+                        try:
+                            did_cfg = json.loads(DID_CONFIG_PATH.read_text())
+                        except Exception:
+                            pass
+                    device_priv = did_cfg.get("device_priv")
+                    if device_priv:
+                        key, _ = derive_capsule_key(device_priv, capsule["id"])
+                    else:
+                        errors.append({"id": capsule["id"], "error": "DID key missing in did.json, skipped"})
+                        continue
+                else:
+                    salt = base64.b64decode(salt_b64)
+                    key = derive_key(master_pw, salt)
 
                 content_enc   = capsule.get("content") or ""
                 content_nonce = capsule.get("nonce")   or ""
@@ -2333,7 +2404,7 @@ def generate_insights(request: Request, authorization: str = Header(None), path:
         "by_path": stats["by_path"],
     }, headers=add_cors_headers(request))
 
-# ── A2: DID 多设备身份 v1.2.20 ─────────────────────────────
+# ── A2: DID 多设备身份 v1.2.22 ─────────────────────────────
 
 @app.post("/did/setup")
 def did_setup(request: Request, authorization: str = Header(None)):
@@ -2362,6 +2433,7 @@ def did_setup(request: Request, authorization: str = Header(None)):
     did_config = {
         "did": did_str,
         "device_id": device_uuid,
+        "device_priv": device_priv_hex,  # D2: 用于胶囊密钥派生
         "device_pub": device_pub_hex,
         "mnemonic": mnemonic,  # 仅此一次
     }
@@ -2409,6 +2481,7 @@ def did_register_device(request: Request, authorization: str = Header(None)):
 
     cfg = json.loads(did_path.read_text())
     huper_url = get_huper_url()
+    api_token = get_api_token()
 
     # 调用云端 /api/did/devices/register 注册设备公钥
     import httpx
@@ -2421,7 +2494,7 @@ def did_register_device(request: Request, authorization: str = Header(None)):
                     "device_pub": cfg["device_pub"],
                     "did": cfg["did"],
                 },
-                headers={"Authorization": f"Bearer {raw_token}"}
+                headers={"Authorization": f"Bearer {api_token}"}
             )
         if resp.status_code == 200:
             return JSONResponse({"ok": True, "device_id": cfg["device_id"]})
@@ -2429,6 +2502,102 @@ def did_register_device(request: Request, authorization: str = Header(None)):
             return JSONResponse({"error": f"云端注册失败: {resp.status_code}"}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"网络错误: {e}"}, status_code=500)
+
+
+@app.post("/did/auth/challenge")
+def did_auth_challenge(request: Request, authorization: str = Header(None)):
+    """
+    获取 DID 认证挑战（调用云端 /api/did/auth/challenge）。
+    返回 challenge_id, challenge, expires_at。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    import json
+    did_path = HOME / ".amber-hunter" / "did.json"
+    if not did_path.exists():
+        return JSONResponse({"error": "请先调用 /did/setup 设置 DID 身份"}, status_code=400)
+
+    cfg = json.loads(did_path.read_text())
+    huper_url = get_huper_url()
+    api_token = get_api_token()
+
+    import httpx
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{huper_url}/api/did/auth/challenge",
+                json={"did": cfg["did"]},
+                headers={"Authorization": f"Bearer {api_token}"}
+            )
+        if resp.status_code == 200:
+            return JSONResponse(resp.json())
+        else:
+            return JSONResponse({"error": f"获取挑战失败: {resp.status_code}", "detail": resp.text}, status_code=resp.status_code)
+    except Exception as e:
+        return JSONResponse({"error": f"网络错误: {e}"}, status_code=500)
+
+
+@app.post("/did/auth/sign-challenge")
+def did_auth_sign_challenge(
+    challenge_id: str,
+    challenge: str,
+    request: Request = None,
+    authorization: str = Header(None),
+):
+    """
+    用本设备 Ed25519 私钥签名 challenge，提交云端验证，返回 DID token。
+    云端返回 { token, expires_at }，本服务保存到 did.json。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    import json
+    did_path = HOME / ".amber-hunter" / "did.json"
+    if not did_path.exists():
+        return JSONResponse({"error": "请先调用 /did/setup 设置 DID 身份"}, status_code=400)
+
+    cfg = json.loads(did_path.read_text())
+    device_priv_hex = cfg.get("device_priv")
+    if not device_priv_hex:
+        return JSONResponse({"error": "设备私钥不存在，请重新运行 /did/setup"}, status_code=400)
+
+    # Ed25519 签名
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    priv_bytes = bytes.fromhex(device_priv_hex)
+    priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(priv_bytes)
+    signature = priv_key.sign(challenge.encode()).hex()
+
+    huper_url = get_huper_url()
+    api_token = get_api_token()
+
+    import httpx
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{huper_url}/api/did/auth/verify",
+                json={
+                    "challenge_id": challenge_id,
+                    "challenge": challenge,
+                    "signature": signature,
+                    "device_id": cfg["device_id"],
+                },
+                headers={"Authorization": f"Bearer {api_token}"}
+            )
+        if resp.status_code == 200:
+            result = resp.json()
+            did_token = result.get("token")
+            if did_token:
+                # 保存 DID token 到 did.json
+                cfg["did_token"] = did_token
+                cfg["did_token_expires_at"] = result.get("expires_at")
+                did_path.write_text(json.dumps(cfg))
+            return JSONResponse(result)
+        else:
+            return JSONResponse({"error": f"验证失败: {resp.status_code}", "detail": resp.text}, status_code=resp.status_code)
+    except Exception as e:
+        return JSONResponse({"error": f"网络错误: {e}"}, status_code=500)
+
 
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
@@ -2499,7 +2668,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.20 启动")
+    print("🌙 Amber-Hunter v1.2.22 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

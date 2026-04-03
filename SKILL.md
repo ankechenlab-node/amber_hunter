@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.20 | 2026-04-04
+> Version: 1.2.22 | 2026-04-04
 
 ---
 
@@ -304,6 +304,8 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ## Version History
 
+- **v1.2.22** (2026-04-04): Fix line 1570 bug (`row[2]`→`stored_challenge`) in `/api/did/auth/verify`; add `POST /did/auth/challenge` + `POST /did/auth/sign-challenge` in amber_hunter; fix `did_register_device` to use `get_api_token()`; fix `HOME` reference before definition.
+- **v1.2.21** (2026-04-04): D2 DID Challenge-Response Auth + capsule key derivation — `derive_capsule_key` wired into `create_capsule`/`get_capsule` (DID device key → AES-256-GCM, PBKDF2 fallback); `POST /api/did/auth/challenge` + `POST /api/did/auth/verify` endpoints; `require_auth` supports DID token; `device_priv` saved to `did.json`.
 - **v1.2.8** (2026-04-01): Fix proactive-check.js — filter log lines from session transcript; memo truncation 60→80 chars.
 - **v1.2.4** (2026-04-01): Fix `source_type`/`category` missing in sync payload; `httpx.Client` reuse for sync; `/capsules` limit param; `/memories` new fields.
 - **v1.2.3** (2026-04-01): Fix `/recall` semantic search on full corpus; hybrid mode `0.4×keyword + 0.6×semantic`; `/status` enhanced with capsule_count/queue_pending/last_sync.
