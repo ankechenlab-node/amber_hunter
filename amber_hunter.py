@@ -865,27 +865,70 @@ def recall_memories(
             "created_at","salt","nonce","synced","source_type","category"]
     capsules_raw = [dict(zip(keys, r)) for r in rows]
 
-    # ── 解密 content ──────────────────────────────
-    master_pw = get_master_password()
-    parsed = []
-    for cap in capsules_raw:
-        content = cap.get("content") or ""
-        if cap.get("salt") and cap.get("nonce") and content and master_pw:
-            try:
-                import base64 as _b64
-                salt = _b64.b64decode(cap["salt"])
-                nonce = _b64.b64decode(cap["nonce"])
-                ciphertext = _b64.b64decode(content)
-                key = derive_key(master_pw, salt)
-                plaintext = decrypt_content(ciphertext, key, nonce)
-                content = plaintext.decode("utf-8") if plaintext else ""
-            except Exception:
-                content = ""
-        cap["_text"] = f"{cap.get('memo','')}\n{content}"  # 用于语义编码
-        cap["_plain_content"] = content
-        parsed.append(cap)
+    # ── v1.2.10+: keyword模式两阶段：先用memo+tags预筛，避免全量解密 ──
+    # 第一阶段：只靠未加密的memo+tags评分，不解密任何content
+    def _kw_score_memo_tags(cap) -> float:
+        score = 0
+        qw = q_lower.split()
+        memo = (cap.get("memo") or "").lower()
+        tags = (cap.get("tags") or "").lower()
+        for w in qw:
+            score += memo.count(w) * 3
+            score += tags.count(w) * 2
+        if q_lower in memo: score += 10
+        return float(score)
 
-    # ── 关键词评分（全量）────────────────────────
+    # keyword模式：只取memo+tags评分最高的50条再解密，避免全量AES解密
+    PRE_DECRYPT_LIMIT = 50
+    if mode == "keyword":
+        # 第一阶段：全部300条只评分不解密
+        scored = [(_kw_score_memo_tags(c), c) for c in capsules_raw]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        # 取top N或所有有分数的
+        top_candidates = [c for _, c in scored[:PRE_DECRYPT_LIMIT]]
+        # 解密content只对候选者
+        master_pw = get_master_password()
+        parsed = []
+        for cap in top_candidates:
+            content = cap.get("content") or ""
+            if cap.get("salt") and cap.get("nonce") and content and master_pw:
+                try:
+                    import base64 as _b64
+                    salt = _b64.b64decode(cap["salt"])
+                    nonce = _b64.b64decode(cap["nonce"])
+                    ciphertext = _b64.b64decode(content)
+                    key = derive_key(master_pw, salt)
+                    plaintext = decrypt_content(ciphertext, key, nonce)
+                    content = plaintext.decode("utf-8") if plaintext else ""
+                except Exception:
+                    content = ""
+            cap["_text"] = f"{cap.get('memo','')}\n{content}"
+            cap["_plain_content"] = content
+            parsed.append(cap)
+        capsules_raw = []  # 释放内存
+    else:
+        # semantic/hybrid模式：全量解密（语义编码需要完整_text）
+        master_pw = get_master_password()
+        parsed = []
+        for cap in capsules_raw:
+            content = cap.get("content") or ""
+            if cap.get("salt") and cap.get("nonce") and content and master_pw:
+                try:
+                    import base64 as _b64
+                    salt = _b64.b64decode(cap["salt"])
+                    nonce = _b64.b64decode(cap["nonce"])
+                    ciphertext = _b64.b64decode(content)
+                    key = derive_key(master_pw, salt)
+                    plaintext = decrypt_content(ciphertext, key, nonce)
+                    content = plaintext.decode("utf-8") if plaintext else ""
+                except Exception:
+                    content = ""
+            cap["_text"] = f"{cap.get('memo','')}\n{content}"
+            cap["_plain_content"] = content
+            parsed.append(cap)
+        capsules_raw = []
+
+    # ── 关键词评分（解密后）────────────────────────
     def _kw_score(cap) -> float:
         score = 0
         qw = q_lower.split()
