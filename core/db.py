@@ -192,14 +192,31 @@ def get_capsule(capsule_id: str) -> dict | None:
         conn.close()
 
 
-def list_capsules(limit: int = 50) -> list[dict]:
+def count_capsules() -> int:
+    """返回胶囊总数"""
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
-    rows = c.execute(
-        "SELECT id,memo,content,tags,session_id,window_title,created_at,"
-        "salt,nonce,synced,source_type,category,category_path "
-        "FROM capsules ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    row = c.execute("SELECT COUNT(*) FROM capsules").fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def list_capsules(limit: int = 50, category_path: str = "") -> list[dict]:
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    if category_path:
+        rows = c.execute(
+            "SELECT id,memo,content,tags,session_id,window_title,created_at,"
+            "salt,nonce,synced,source_type,category,category_path "
+            "FROM capsules WHERE category_path LIKE ? || '%' ORDER BY created_at DESC LIMIT ?",
+            (category_path, limit)
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT id,memo,content,tags,session_id,window_title,created_at,"
+            "salt,nonce,synced,source_type,category,category_path "
+            "FROM capsules ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
     conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","created_at",
             "salt","nonce","synced","source_type","category","category_path"]

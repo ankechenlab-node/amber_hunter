@@ -18,7 +18,7 @@ from core.keychain import (
     ensure_config_dir, CONFIG_PATH,
     get_os, is_headless,
 )
-from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_synced,
+from core.db import (init_db, insert_capsule, get_capsule, list_capsules, count_capsules, mark_synced,
     get_unsynced_capsules, get_config, set_config,
     queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update,
     insert_memory_hit, update_capsule_hit,
@@ -762,12 +762,26 @@ def get_memories(limit: int = 20, request: Request = None):
 
 
 @app.get("/capsules")
-def list_capsules_handler(authorization: str = Header(None), request: Request = None,
-                          limit: int = 50):
+def list_capsules_handler(
+    authorization: str = Header(None),
+    request: Request = None,
+    limit: int = 50,
+    category_path: str = "",
+):
+    """
+    列出胶囊列表（支持分页和路径过滤）。
+    - limit: 返回数量（默认50，最大300）
+    - category_path: MFS路径过滤，支持前缀匹配
+    """
     verify_token(authorization)
-    capsules = list_capsules(limit=max(1, min(limit, 300)))
+    limit = max(1, min(limit, 300))
+    capsules = list_capsules(limit=limit, category_path=category_path)
+    total = count_capsules()
     h = add_cors_headers(request) if request else {}
     return JSONResponse({
+        "total":          total,
+        "returned":      len(capsules),
+        "category_path": category_path,
         "capsules": [
             {
                 "id":                    c["id"],
@@ -775,6 +789,7 @@ def list_capsules_handler(authorization: str = Header(None), request: Request = 
                 "content":               c.get("content") or "",
                 "tags":                  c["tags"],
                 "category":              c.get("category") or "",
+                "category_path":         c.get("category_path") or "general/default",
                 "source_type":           c.get("source_type") or "manual",
                 "session_id":            c["session_id"],
                 "window_title":          c["window_title"],
