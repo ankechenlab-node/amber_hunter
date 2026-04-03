@@ -11,6 +11,8 @@
 - **P2-9: 同步前网络可达性预检** — 同步前用 `socket.create_connection` 检查 huper.org 443 端口，不可达则立即返回避免无用尝试
 - **P2-10: `get_unsynced_capsules` 加 `ORDER BY created_at ASC`** — 保证胶囊按创建顺序上传
 - **P3-11: `last_sync_at` 独立记录** — 同步完成后用 `set_config("last_sync_at", timestamp)` 而非 `MAX(created_at)`，保证 `last_sync` 时间精确
+- **P3-13: 同步间隔可配置** — 定时同步从 config 读取 `sync_interval_minutes`（默认 30 分钟），Dashboard 可动态调整
+- **`CapsuleUpdate` 未导入** — 修复 `update_capsule` 函数因缺少 `from core.models import CapsuleIn, CapsuleUpdate` 导致 FastAPI OpenAPI schema 生成失败（返回 422）
 
 ### Changed
 - **P0-3: `sync_to_cloud` 返回值增强** — 返回 `failed`（失败数）、`partial`（是否有部分失败）、`all_synced`（是否全部成功）字段，Dashboard 可精准展示同步状态

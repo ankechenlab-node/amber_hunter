@@ -27,7 +27,7 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, count_
     save_tag_feedback, get_tag_feedback,
     _get_conn)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
-from core.models import CapsuleIn
+from core.models import CapsuleIn, CapsuleUpdate
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
 
 # ── FastAPI ─────────────────────────────────────────────
@@ -2233,10 +2233,12 @@ def main():
     print(f"   API:        http://localhost:18998/")
     print(f"   CORS:       https://huper.org + localhost")
     print(f"   认证:       本地 API token")
-    # 启动 30 分钟定时同步守护线程
+    # P3-13: 启动定时同步守护线程（间隔可配置，默认 30 分钟）
     def _periodic_sync_loop():
         while True:
-            time.sleep(30 * 60)          # 先休眠再执行，避免启动时立即同步
+            interval_minutes = int(get_config("sync_interval_minutes") or 30)
+            interval_seconds = interval_minutes * 60
+            time.sleep(interval_seconds)   # 先休眠再执行，避免启动时立即同步
             _spawn_sync_if_enabled()
     t = threading.Thread(target=_periodic_sync_loop, daemon=True, name="amber-periodic-sync")
     t.start()
