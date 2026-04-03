@@ -113,7 +113,7 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3&rerank=true`); hybrid mode: `0.4×keyword + 0.6×semantic`; returns category/source_type |
+| `/recall` | GET | Bearer / ?token= | Retrieve relevant memories (`?q=<query>&limit=3&rerank=true&category_path=<path>`); hybrid mode: `0.4×keyword + 0.6×semantic`; `category_path` 支持前缀匹配（如 `knowledge` 匹配 `knowledge/python`）；返回 category/source_type |
 | `/rerank` | POST | Bearer / ?token= | LLM re-rank candidates; body: `{query, memories[]}` → `{memories: [...]}` |
 | `/recall/{id}/hit` | PATCH | Bearer / ?token= | Increment capsule access count (updates hotness) |
 | `/classify` | GET | none | Topic classify; `?text=<text>` → `{"topics": "tag1,tag2"}`; keyword primary, LLM fallback |
