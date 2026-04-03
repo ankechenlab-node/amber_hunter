@@ -1,14 +1,36 @@
 """
 core/db.py — SQLite 数据库操作
 v1.1.9: 新增 source_type/category 列 + memory_queue 表
+v1.2.11: thread-local 连接缓存，减少连接开销
 """
 
 import sqlite3, json, secrets, time
+import threading
 from pathlib import Path
 from typing import Optional
 
 HOME = Path.home()
 DB_PATH = HOME / ".amber-hunter" / "hunter.db"
+
+# ── Thread-local 连接缓存 ─────────────────────────────────
+# 每个线程缓存一个连接，避免频繁开闭
+_thread_local = threading.local()
+
+
+def _get_conn() -> sqlite3.Connection:
+    """获取当前线程的缓存连接，没有则创建新的"""
+    if not hasattr(_thread_local, "conn") or _thread_local.conn is None:
+        _thread_local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _thread_local.conn.row_factory = sqlite3.Row
+    return _thread_local.conn
+
+
+def _close_conn():
+    """关闭并清理当前线程的缓存连接"""
+    conn = getattr(_thread_local, "conn", None)
+    if conn is not None:
+        conn.close()
+        _thread_local.conn = None
 
 
 def init_db():

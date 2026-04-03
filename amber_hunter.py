@@ -22,7 +22,8 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_s
     get_unsynced_capsules, get_config, set_config,
     queue_insert, queue_list_pending, queue_get, queue_set_status, queue_update,
     insert_memory_hit, update_capsule_hit,
-    save_tag_feedback, get_tag_feedback)
+    save_tag_feedback, get_tag_feedback,
+    _get_conn)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
@@ -927,7 +928,7 @@ def recall_memories(
     q_lower = q.lower().strip()
 
     # ── 读取所有胶囊（含 category_path）────────────────
-    conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
+    conn = _get_conn()
     c = conn.cursor()
 
     # category_path 前缀过滤（支持路径路由）
@@ -943,7 +944,7 @@ def recall_memories(
             "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced,source_type,category,category_path "
             "FROM capsules ORDER BY created_at DESC LIMIT 300"
         ).fetchall()
-    conn.close()
+    # 注意：不断开连接，由连接池管理
 
     keys = ["id","memo","content","tags","session_id","window_title","url",
             "created_at","salt","nonce","synced","source_type","category","category_path"]
