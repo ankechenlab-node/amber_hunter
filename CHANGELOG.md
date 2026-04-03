@@ -1,3 +1,30 @@
+## [v1.2.22] — 2026-04-04
+
+### Added
+- **D2: DID Challenge-Response auth** — `POST /did/auth/challenge` + `/did/auth/sign-challenge` client-side endpoints
+- **D2: Capsule encryption via DID key** — `create_capsule`/`get_capsule`/`_do_sync_capsules` wire `derive_capsule_key` (DID device_priv → HMAC-SHA256 → AES-256-GCM), PBKDF2 fallback
+
+### Fixed
+- Fix `row[2]` vs `challenge` bug in cloud `/api/did/auth/verify` (line 1570)
+- Fix `did_register_device` using wrong token (raw local token → `get_api_token()`)
+- Fix `HOME` reference before definition (line 656)
+- Fix `did.py` not deployed to VPS (required for Ed25519 verification)
+
+## [v1.2.20] — 2026-04-04
+
+### Added
+- **A2: DID multi-device identity** — BIP-39 mnemonic → Ed25519 identity keypair + device key; `POST /did/setup` (generates + saves to did.json), `GET /did/status`, `POST /did/register-device`
+
+## [v1.2.19] — 2026-04-04
+
+### Added
+- **B3: Proactive intent prediction** — handler.js scene detection (SCENES/detectScene/loadPreloadMemories/writePreloadFile), `GET /session/preload` returns context-aware memories before AI responds
+
+## [v1.2.18] — 2026-04-04
+
+### Added
+- **B2: Insight cache compression** — `insights` table stores LLM-compressed summaries per category_path; `GET /admin/generate-insights`; `GET /recall?use_insights=true` prioritizes insight cache over full capsule scan
+
 ## [v1.2.17] — 2026-04-04
 
 ### Fixed
