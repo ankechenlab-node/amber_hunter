@@ -491,6 +491,145 @@ def get_llm(config: LLMConfig = None) -> LLMProvider:
     return provider_class(config)
 
 
+# ---------------------------------------------------------------------------
+# Auto-detection of current LLM from agent config
+# ---------------------------------------------------------------------------
+
+def _detect_provider_for_model(model_id: str) -> str:
+    """Map a model ID to its provider by checking openclaw config."""
+    openclaw_config = os.path.expanduser("~/.openclaw/openclaw.json")
+    if os.path.exists(openclaw_config):
+        try:
+            with open(openclaw_config) as f:
+                oc = json.load(f)
+            providers = oc.get("models", {}).get("providers", {})
+            for provider_name, provider_data in providers.items():
+                models = provider_data.get("models", [])
+                for m in models:
+                    if m.get("id") == model_id:
+                        return provider_name
+        except:
+            pass
+    # Fallback: infer from model name patterns
+    model_lower = model_id.lower()
+    if "claude" in model_lower:
+        return "claude"
+    elif "gpt" in model_lower or "openai" in model_lower:
+        return "openai"
+    elif "minimax" in model_lower or "abab" in model_lower:
+        return "minimax"
+    elif "qwen" in model_lower or "bailian" in model_lower:
+        return "bailian"
+    elif "gemini" in model_lower:
+        return "gemini"
+    elif "groq" in model_lower:
+        return "groq"
+    return "minimax"
+
+
+def detect_current_llm() -> tuple[str, str, str]:
+    """
+    Detect the currently active LLM from the agent's configuration.
+
+    Returns (provider, model_id, api_key) tuple.
+
+    Priority:
+    1. ANTHROPIC_MODEL env var (Claude Code explicit override)
+    2. ~/.openclaw/openclaw.json → agents.defaults.model.primary
+    3. ~/.claude/settings.json → env.ANTHROPIC_MODEL
+
+    Returns ("", "", "") if no detection possible.
+    """
+    # 1. ANTHROPIC_MODEL env var
+    env_model = os.environ.get("ANTHROPIC_MODEL", "")
+    if env_model:
+        provider = _detect_provider_for_model(env_model)
+        api_key = _get_api_key_for_provider(provider)
+        return (provider, env_model, api_key)
+
+    # 2. OpenClaw config: agents.defaults.model.primary
+    openclaw_config = os.path.expanduser("~/.openclaw/openclaw.json")
+    if os.path.exists(openclaw_config):
+        try:
+            with open(openclaw_config) as f:
+                oc = json.load(f)
+            primary = oc.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+            if primary and "/" in primary:
+                provider, model_id = primary.split("/", 1)
+                api_key = _get_api_key_for_provider(provider, openclaw_config=oc)
+                return (provider, model_id, api_key)
+        except:
+            pass
+
+    # 3. Claude Code settings: ~/.claude/settings.json → env.ANTHROPIC_MODEL
+    claude_settings = os.path.expanduser("~/.claude/settings.json")
+    if os.path.exists(claude_settings):
+        try:
+            with open(claude_settings) as f:
+                settings = json.load(f)
+            env = settings.get("env", {})
+            model = env.get("ANTHROPIC_MODEL", "")
+            if model:
+                provider = _detect_provider_for_model(model)
+                api_key = _get_api_key_for_provider(provider)
+                return (provider, model, api_key)
+        except:
+            pass
+
+    return ("", "", "")
+
+
+def _get_api_key_for_provider(provider: str, openclaw_config: dict = None) -> str:
+    """
+    Get API key for a provider from OpenClaw config.
+    Handles both legacy (root-level apiKey) and new (providers.{name}.apiKey) formats.
+    """
+    if openclaw_config is None:
+        openclaw_path = os.path.expanduser("~/.openclaw/openclaw.json")
+        if os.path.exists(openclaw_path):
+            try:
+                with open(openclaw_path) as f:
+                    openclaw_config = json.load(f)
+            except:
+                return ""
+        else:
+            return ""
+
+    if not openclaw_config:
+        return ""
+
+    providers = openclaw_config.get("models", {}).get("providers", {})
+
+    # Try new format: providers.{provider}.apiKey
+    provider_data = providers.get(provider, {})
+    api_key = provider_data.get("apiKey", "")
+    if api_key and api_key.startswith("sk-"):
+        return api_key
+
+    # Try legacy format: root-level apiKey (only for minimax)
+    if provider in ("minimax", "minimax-cn"):
+        legacy_key = openclaw_config.get("apiKey", "")
+        if legacy_key and legacy_key.startswith("sk-"):
+            return legacy_key
+
+    return ""
+
+
+_PROVIDER_BASE_URLS = {
+    "minimax": "https://api.minimaxi.com/anthropic/v1/messages",
+    "minimax-cn": "https://api.minimaxi.com/anthropic/v1/messages",
+    "openai": "https://api.openai.com/v1/chat/completions",
+    "claude": "https://api.anthropic.com/v1/messages",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
+}
+
+
+def _get_base_url_for_provider(provider: str) -> str:
+    """Get default base URL for a provider."""
+    return _PROVIDER_BASE_URLS.get(provider, "")
+
+
 def load_llm_config() -> LLMConfig:
     """Load LLM config from ~/.amber-hunter/config.json
 
@@ -499,6 +638,7 @@ def load_llm_config() -> LLMConfig:
     2. config["llm"] (new v1.2 format)
     3. config["api_key"] (legacy amber-hunter token — NOT an LLM key, skip)
     4. ~/.openclaw/openclaw.json provider minimax-cn apiKey
+    5. Auto-detect from OpenClaw/Claude Code (NEW)
     """
     # 1. Environment variable
     env_key = os.environ.get("MINIMAX_API_KEY", "")
@@ -560,6 +700,17 @@ def load_llm_config() -> LLMConfig:
                 )
         except:
             pass
+
+    # 5. Auto-detect from OpenClaw/Claude Code
+    provider, model_id, api_key = detect_current_llm()
+    if provider and model_id:
+        base_url = _get_base_url_for_provider(provider)
+        return LLMConfig(
+            provider=provider,
+            model=model_id,
+            api_key=api_key,
+            base_url=base_url,
+        )
 
     return LLMConfig()
 
