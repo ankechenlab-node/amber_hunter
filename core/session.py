@@ -4,6 +4,8 @@
   - OpenClaw:       ~/.openclaw/agents/main/sessions/*.jsonl
   - Claude Cowork:  ~/Library/Application Support/Claude/local-agent-mode-sessions/**/*.jsonl
 """
+from __future__ import annotations
+
 import json, re, sys
 from pathlib import Path
 from datetime import datetime

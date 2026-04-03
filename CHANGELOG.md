@@ -1,3 +1,19 @@
+## [v1.2.13] — 2026-04-03
+
+### Added
+- **语义模型状态细化** — `/status` 返回 `semantic_model_state`（loading/ready/error/unavailable）+ `semantic_model_error`；recall semantic/hybrid 模式若模型正在加载返回 503 + `MODEL_LOADING` code
+- **启动预加载语义模型** — `main()` 末尾调用 `_preload_embed_model()` 后台线程预加载，减少首次语义搜索延迟
+- **E2E测试框架** — `tests/` 目录，pytest + pytest-asyncio + pytest-mock；覆盖 crypto roundtrip、recall 两阶段解密、/status 端点
+
+### Changed
+- **统一信号体系** — handler.ts/js 信号类型统一为 6 种（save_request/decision/preference/personal_fact/summary/insight）；修复 POST 路径 `/capsules` → `/ingest`；添加 `review_required: true`
+- **Python 3.9 兼容** — 所有 core 模块添加 `from __future__ import annotations`；Pydantic 模型改用 `Optional[]` 写法；修复 amber_hunter.py 内 `from typing import Optional` 导入
+
+### Fixed
+- **PY3.9 `bytes | None` 语法错误** — core/db.py、core/keychain.py、core/session.py 添加 `from __future__ import annotations`
+
+---
+
 ## [v1.2.11] — 2026-04-03
 
 ### Added

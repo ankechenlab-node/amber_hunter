@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Universal AI memory backend for Huper琥珀
-> Version: 1.2.11 | 2026-04-03
+> Version: 1.2.13 | 2026-04-03
 
 ---
 
@@ -83,12 +83,14 @@ Use these rules when deciding whether to call `/ingest` during a conversation:
 
 | Signal | Example | confidence | review_required |
 |--------|---------|-----------|-----------------|
-| User explicitly asks to save | "记住这个" / "save this" | 1.0 | false |
-| Clear decision made | "决定用 SQLite" / "we're going with plan B" | 0.9 | true |
-| Preference expressed | "我更喜欢..." / "I prefer TypeScript" | 0.85 | true |
-| Personal fact revealed | name, location, job, relationship | 0.8 | true |
-| End-of-conversation summary | AI extracts 1-2 key takeaways | 0.7 | true |
-| AI judges it might be useful | general insight or observation | 0.6 | true |
+| save_request | "记住这个" / "save this" / "提醒我" | 1.0 | false |
+| decision | "决定用 SQLite" / "we're going with plan B" / "用 FastAPI" | 0.9 | true |
+| preference | "我更喜欢..." / "I prefer TypeScript" | 0.85 | true |
+| personal_fact | 我的名字是... / 我住在... / 我在...工作 | 0.8 | true |
+| summary | "总结一下..." / "key takeaways" / "tl;dr" | 0.7 | true |
+| insight | "没想到..." / "discovered that" / "game changer" | 0.6 | true |
+
+**Proactive Hook** (v1.2.13): `handler.js/ts` auto-detects these 6 signals from `agent:response` events and calls `/ingest` with `review_required: true`. All captured signals appear in the review queue before becoming permanent memories.
 
 **Default behavior**: when in doubt, set `review_required: true`. The user reviews in the dashboard and accepts/rejects. Accepted/rejected history improves future judgment.
 

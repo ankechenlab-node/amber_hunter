@@ -3,11 +3,18 @@
  * amber-proactive hook handler (JavaScript version)
  * Runs on agent:response events — silently captures significant moments to amber
  *
+ * Unified Signals (v1.2.13):
+ * - save_request: 显式要求记住
+ * - decision: 关键决策（架构/方案/技术选型）
+ * - preference: 个人偏好表达
+ * - personal_fact: 个人事实（姓名/工作/地点等）
+ * - summary: 总结/要点提炼
+ * - insight: 重要发现/领悟
+ *
  * SECURITY NOTE: This script is strictly local-only.
  * - process.env.HOME is used ONLY to build local filesystem paths (~/.amber-hunter/)
  * - ALL network calls go exclusively to localhost:18998 (the amber-hunter local service)
  * - No data is ever sent to any external server or internet endpoint
- * - Optional cloud sync is a separate user-initiated action handled by amber-hunter itself
  */
 const fs = require('fs');
 const http = require('http');
@@ -18,41 +25,42 @@ const AMBER_PORT = 18998;
 const CONFIG_PATH = path.join(process.env.HOME || '', '.amber-hunter', 'config.json');
 const LOG_PATH    = path.join(process.env.HOME || '', '.amber-hunter', 'amber-proactive.log');
 
+// ── Signal Patterns v1.2.13 ─────────────────────────────────
 const SIGNALS = {
-  // 用户纠正了 AI 的错误
-  correction: [
-    /不对|不是这样|错了|错了啦|no,?\s*(?:that|it's|you)|actually|not quite/i,
-    /that('s| is) (?:not |no )?(?:right|correct)|you('re| are) wrong/i,
-    /let me (?:correct|fix) that|my mistake|i meant/i,
-    /\bwait\b.*(?:actually|not|no)/i,
+  // 显式要求记住
+  save_request: [
+    /(?:记住|记下|save this|remember this|别忘了|别忘记|capture this)/i,
+    /提醒我|我需要记得/i,
   ],
-  // 错误被解决：发现了方法/方案
-  error_fix: [
-    /错误|失败|exception|traceback|bug|崩溃/i,
-    /找到了|发现.{0,10}(?:方法|方案|原因|解决)/i,
-    /(?:solution|fix|workaround):?\s*(.+)/i,
-    /(?:试试|用这个|这个可以|这样就行)/i,
-  ],
-  // 关键决策：确定了架构/方案/方向
+  // 关键决策
   decision: [
-    /决定|决定了|decision|choosing|agreed|architecture/i,
-    /(?:用|用\w+|采用)(?:FastAPI|Flask|React|Vue|Python|JS|TS|Go|Rust)/i,
-    /(?:go with|going with|settled on|using)\s+(\S+)/i,
-    /(?:tech stack|技术栈|架构)/i,
+    /(?:决定|decided|choosing|going with|settled on|we('re| are) using)/i,
+    /(?:用|采用)(?:FastAPI|Flask|React|SQLite|Postgres|Python|JS|TS|Go|Rust|Docker)/i,
+    /let'?s (?:go with|use|try|build|implement)/i,
+    /(?:architecture|tech stack|stack):\s*(.+)/i,
   ],
-  // 用户偏好：明确表达个人喜好
+  // 个人偏好
   preference: [
-    /我喜欢|我一般|我通常|我比较|我不喜欢|我不怎么|我宁愿/i,
-    /(?:usually|prefer|tend|always|never|like to|don't like|don't usually)/i,
+    /我(?:比较|一般|通常|宁愿|更喜欢|不太喜欢)/i,
+    /i (?:usually|prefer|tend|always|never|like to|don't like)/i,
     /my (?:preferred|preference|prefer|default|usual|style|approach)/i,
-    /(?:for me|i('d| would) prefer|i('m| am) more comfortable)/i,
   ],
-  // 重要发现/第一次做到
-  discovery: [
-    /第一次|首次|第一次做|头一次/i,
+  // 个人事实
+  personal_fact: [
+    /我的名字(?:是|叫)|我叫/i,
+    /(?:我|my)\s+(?:公司|团队|老板|同事)\s*(?:是|叫|在)/i,
+    /(?:我|my)\s*(?:住在|工作于|在|做|是).{0,20}/i,
+  ],
+  // 总结/要点
+  summary: [
+    /(?:总结|要点|summarize|summary|tl;dr|in short|总之|总的来说)/i,
+    /(?:key point|main takeaway|主要|关键是)/i,
+  ],
+  // 重要发现/领悟
+  insight: [
+    /(?:没想到|居然|竟然|奇怪|意外|忽然意识到)/i,
     /(?:discovered|found out|learned that|just found)/i,
-    /(?:game.?changer|breakthrough|novel|没想到|居然|竟然)/i,
-    /原来.{0,15}(?:可以|要|是|需要)/i,
+    /(?:game.?changer|breakthrough|novel|eye-?opening)/i,
   ],
 };
 
@@ -70,7 +78,7 @@ function httpPost(apiPath, body, token) {
   return new Promise(resolve => {
     const bodyStr = JSON.stringify(body);
     const opts = {
-      hostname: 'localhost', port: AMBER_PORT, path: apiPath, // localhost only — data never leaves your machine
+      hostname: 'localhost', port: AMBER_PORT, path: apiPath,
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -131,9 +139,12 @@ async function main() {
     content: signals.map(s => s.snippet).join('\n---\n').slice(0, 1000),
     tags: types.join(','),
     session_id: event.sessionKey || null,
+    source: 'openclaw-proactive',
+    review_required: true,   // v1.2.13: 必须经过审核
+    confidence: 0.8,
   };
 
-  const ok = await httpPost('/capsules', capsule, token);
+  const ok = await httpPost('/ingest', capsule, token);  // v1.2.13: 改用 /ingest
   log(`amber-proactive: ${ok ? 'captured' : 'failed'} — ${types.join('+')}`);
   process.exit(0);
 }

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.9
+Amber-Hunter v1.2.13
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
 """
+from __future__ import annotations
 
 import os, sys, json, time, secrets, sqlite3, hashlib, base64, gc, threading, logging
 from pathlib import Path
+from typing import Optional
 
 # ── 核心模块 ────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
@@ -39,6 +41,9 @@ from starlette.responses import Response
 # ── 语义模型缓存（模块级，只加载一次）────────────────────
 _EMBED_MODEL = None
 _SEMANTIC_AVAILABLE = None  # 缓存语义搜索可用性检查结果
+_MODEL_LOADING = False      # 是否正在加载中
+_MODEL_LOAD_ERROR = None    # 加载失败原因
+_MODEL_LOAD_LOCK = threading.Lock()  # 防止并发重复加载
 
 
 # ── 通用辅助函数 ─────────────────────────────────────────
@@ -241,19 +246,52 @@ def _get_topics_from_config() -> list[dict]:
     return DEFAULT_TOPICS
 
 
-def _get_embed_model():
-    """懒加载向量模型（all-MiniLM-L6-v2）."""
-    global _EMBED_MODEL, _SEMANTIC_AVAILABLE
+def _get_embed_model(blocking: bool = True):
+    """
+    懒加载向量模型（all-MiniLM-L6-v2），线程安全。
+
+    Args:
+        blocking: True=同步等待加载完成；False=若正在加载则立即返回 None（不阻塞）
+    Returns:
+        模型实例或 None
+    """
+    global _EMBED_MODEL, _SEMANTIC_AVAILABLE, _MODEL_LOADING, _MODEL_LOAD_ERROR
+
     if _EMBED_MODEL is not None:
         return _EMBED_MODEL
-    try:
-        from sentence_transformers import SentenceTransformer
-        _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-        _SEMANTIC_AVAILABLE = True
-        return _EMBED_MODEL
-    except Exception:
-        _SEMANTIC_AVAILABLE = False
-        return None
+
+    with _MODEL_LOAD_LOCK:
+        # 双重检查（获取锁后）
+        if _EMBED_MODEL is not None:
+            return _EMBED_MODEL
+
+        if _MODEL_LOADING:
+            if not blocking:
+                return None
+            # 等待中：释放锁后由外层再次尝试...
+
+        _MODEL_LOADING = True
+        _MODEL_LOAD_ERROR = None
+        try:
+            from sentence_transformers import SentenceTransformer
+            _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            _SEMANTIC_AVAILABLE = True
+            return _EMBED_MODEL
+        except Exception as e:
+            _MODEL_LOAD_ERROR = str(e)
+            _SEMANTIC_AVAILABLE = False
+            _EMBED_MODEL = None
+            return None
+        finally:
+            _MODEL_LOADING = False
+
+
+def _preload_embed_model():
+    """后台线程预加载语义模型，不阻塞主线程。"""
+    def _background_load():
+        _get_embed_model(blocking=True)
+    t = threading.Thread(target=_background_load, daemon=True, name="amber-embed-preload")
+    t.start()
 
 
 def _cosine_sim(a: list, b: list) -> float:
@@ -572,7 +610,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.11")
+app = FastAPI(title="Amber Hunter", version="1.2.13")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1094,8 +1132,14 @@ def recall_memories(
     if mode in ("auto", "semantic", "hybrid"):
         try:
             import numpy as _np
-            model = _get_embed_model()
+            model = _get_embed_model(blocking=False)
             if model is None:
+                if _MODEL_LOADING:
+                    return JSONResponse({
+                        "error": "语义模型正在加载中，请稍后重试",
+                        "code": "MODEL_LOADING",
+                        "retry_after": 10,
+                    }, status_code=503, headers=add_cors_headers(request))
                 raise ImportError("embedding model not available")
             q_vec = model.encode(q)
             texts = [c["_text"][:512] for c in parsed]
@@ -1247,9 +1291,9 @@ def recall_memories(
 
 # ── v1.2.8: Hit tracking ───────────────────────────────────────────
 class HitIn(BaseModel):
-    session_id: str | None = None
-    search_query: str | None = None
-    relevance_score: float | None = None
+    session_id: Optional[str] = None
+    search_query: Optional[str] = None
+    relevance_score: Optional[float] = None
 
 
 @app.patch("/recall/{capsule_id}/hit")
@@ -1913,7 +1957,7 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
 
 # ── 配置读取（Dashboard 用）────────────────────────────
 class ConfigIn(BaseModel):
-    auto_sync: bool | None = None
+    auto_sync: Optional[bool] = None
 
 @app.get("/config")
 def get_config_handler(request: Request, authorization: str = Header(None)):
@@ -2073,7 +2117,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.11",
+        "version":            "1.2.13",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2082,6 +2126,13 @@ def get_status(request: Request):
         "workspace":          str(HOME / ".openclaw" / "workspace"),
         "huper_url":          get_huper_url(),
         "semantic_model_loaded": _EMBED_MODEL is not None,
+        "semantic_model_state": (
+            "loading" if _MODEL_LOADING
+            else "ready" if _EMBED_MODEL is not None
+            else "error" if _MODEL_LOAD_ERROR
+            else "unavailable"
+        ),
+        "semantic_model_error": _MODEL_LOAD_ERROR,
         "capsule_count":      db_stats["capsule_count"],
         "queue_pending":      db_stats["queue_pending"],
         "last_sync":          db_stats["last_sync"],
@@ -2090,12 +2141,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.11", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.13", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.2 启动")
+    print("🌙 Amber-Hunter v1.2.13 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
@@ -2109,6 +2160,8 @@ def main():
             _spawn_sync_if_enabled()
     t = threading.Thread(target=_periodic_sync_loop, daemon=True, name="amber-periodic-sync")
     t.start()
+    # 后台预加载语义模型
+    _preload_embed_model()
 
     uvicorn.run(app, host="127.0.0.1", port=18998, log_level="warning")
 

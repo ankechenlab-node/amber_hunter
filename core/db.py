@@ -3,6 +3,7 @@ core/db.py — SQLite 数据库操作
 v1.1.9: 新增 source_type/category 列 + memory_queue 表
 v1.2.11: thread-local 连接缓存，减少连接开销
 """
+from __future__ import annotations
 
 import sqlite3, json, secrets, time
 import threading

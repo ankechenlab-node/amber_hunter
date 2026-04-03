@@ -8,6 +8,7 @@ core/keychain.py — 跨平台密钥管理
 - Linux:     secret-tool（libsecret/GNOME Keyring）
 - Fallback:  config.json（仅限 api_token，master_password 必须用系统密钥链）
 """
+from __future__ import annotations
 
 import os, json, subprocess, sys
 from pathlib import Path

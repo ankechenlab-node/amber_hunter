@@ -2,6 +2,7 @@
 core/crypto.py — AES-256-GCM 加密/解密 + PBKDF2 密钥派生
 所有加密操作集中在此模块
 """
+from __future__ import annotations
 
 import os, hashlib, base64
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
