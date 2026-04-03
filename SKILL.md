@@ -1,10 +1,14 @@
 # Amber-Hunter Skill
-> Universal AI memory backend for Huper琥珀
+> Gives any AI client long-term memory — captures, encrypts, and recalls personal context across sessions
 > Version: 1.2.22 | 2026-04-04
 
 ---
 
-> amber-hunter runs on the user's local machine (Mac / Linux / Windows). Local AI clients communicate via `localhost:18998`. External AI clients (ChatGPT, Claude.ai) use the cloud API at `huper.org/api`.
+> **Tags**: ai-memory | second-brain | local-encrypted | proactive-recall | cross-platform | context-management | RAG | long-term-memory | AI-personal-assistant | privacy-first
+
+---
+
+amber-hunter runs on the user's local machine (Mac / Linux / Windows). Local AI clients communicate via `localhost:18998`. External AI clients (ChatGPT, Claude.ai) use the cloud API at `huper.org/api`.
 
 ---
 
@@ -12,13 +16,14 @@
 
 Amber-Hunter is the **capture and recall layer** of Huper琥珀 — a personal memory protocol that works across any AI client and any platform.
 
-- **Free & open** — works immediately after install, no account needed
-- **Universal capture** — works for developers AND everyday life memories
-- **AI-initiated writes** — any AI can push memories via `/ingest`; user reviews and approves
-- **Active recall** — `/recall?q=<query>` retrieves relevant past memories before responding
-- **E2E encrypted** — AES-256-GCM, master_password stored in OS keychain, never uploaded
+- **AI long-term memory** — gives ChatGPT, Claude, and any AI client persistent context across conversations
+- **Proactive capture** — AI-initiated writes via `/ingest`; user reviews and approves before memories are stored
+- **Instant recall** — `/recall?q=<query>` retrieves relevant past memories before responding (hybrid semantic + keyword search)
+- **Second brain** — builds a personal knowledge base that survives context windows and session boundaries
+- **E2E encrypted** — AES-256-GCM, master_password in OS keychain, never uploaded in plaintext
 - **Cross-platform** — macOS / Windows / Linux (desktop + headless server)
-- **Cloud sync** — optional, encrypted upload to huper.org for cross-device access
+- **Cloud sync** — optional encrypted upload to huper.org for cross-device access
+- **RAG-ready** — `/recall` endpoint returns structured context for Retrieval Augmented Generation pipelines
 
 ---
 
