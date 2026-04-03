@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.18
+Amber-Hunter v1.2.19
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -774,6 +774,31 @@ def session_files(request: Request):
         "files": files,
         "workspace": str(HOME / ".openclaw" / "workspace")
     }, headers=headers)
+
+# ── B3: 场景预加载记忆 v1.2.18 ────────────────────────────────
+@app.get("/session/preload")
+def get_session_preload(request: Request, session_id: str = ""):
+    """
+    返回指定 session 的预加载记忆（供 Agent heartbeat 读取）。
+    session_id='' 时返回最新的预加载文件。
+    """
+    h = add_cors_headers(request)
+    preload_dir = HOME / ".amber-hunter" / "preload"
+    if not preload_dir.exists():
+        return JSONResponse({"scene": "none", "category_path": "", "memories": []}, headers=h)
+
+    if session_id:
+        preload_file = preload_dir / f"{session_id}_preload.json"
+        if not preload_file.exists():
+            return JSONResponse({"scene": "none", "category_path": "", "memories": []}, headers=h)
+        data = json.loads(preload_file.read_text())
+        return JSONResponse(data, headers=h)
+    else:
+        files = sorted(preload_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not files:
+            return JSONResponse({"scene": "none", "category_path": "", "memories": []}, headers=h)
+        data = json.loads(files[0].read_text())
+        return JSONResponse(data, headers=h)
 
 @app.api_route("/freeze", methods=["GET", "POST", "OPTIONS"])
 def trigger_freeze(request: Request, authorization: str = Header(None)):
@@ -2347,7 +2372,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.18",
+        "version":            "1.2.19",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2377,7 +2402,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.18 启动")
+    print("🌙 Amber-Hunter v1.2.19 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

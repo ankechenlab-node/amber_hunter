@@ -25,6 +25,98 @@ const AMBER_PORT = 18998;
 const CONFIG_PATH = path.join(process.env.HOME || '', '.amber-hunter', 'config.json');
 const LOG_PATH    = path.join(process.env.HOME || '', '.amber-hunter', 'amber-proactive.log');
 
+// ── Scene Detection v1.2.18 ────────────────────────────────
+const SCENES = {
+  dev: {
+    keywords: /\b(python|javascript|js|git|docker|api|error|bug|code|react|node|flask|fastapi|sql|postgres|sqlite|type(?:script)?|rust|go|java|c\+\+|ruby|php|shell|bash|linux|nginx|deploy|部署|编译|构建|测试|test|单元|集成|pip|npm|yarn|runtime|compiler|linter|debug)\b/i,
+    category_path: 'knowledge/devops',
+  },
+  learning: {
+    keywords: /\b(读|书|course|tutorial|课程|文档|学|learn|study|book|手册|教程|视频|paper|论文|spec|规范|指南|reference|docs)\b/i,
+    category_path: 'knowledge/llm',
+  },
+  decision: {
+    keywords: /\b(决定|decided|chose|选|方案|architecture|架构|tech stack|技术栈|going with|we'll use|采用|使用|settled on|选择|结论)\b/i,
+    category_path: 'projects/huper',
+  },
+  creative: {
+    keywords: /\b(设计|创意|画|design|creative|写文章|writing|画图|草图|原型|prototype|UI|UX|界面|配色|字体|布局|animation|动画)\b/i,
+    category_path: 'creative/writing',
+  },
+  people: {
+    keywords: /\b(和.*聊|和.*谈|talked|met with|见了|约了|会议|meeting|call|通话|讨论|沟通)\b/i,
+    category_path: 'people/leo',
+  },
+  life: {
+    keywords: /\b(运动|睡眠|睡觉|吃饭|exercise|sleep|food|health|跑步|gym|健身|饮食|体重|休息|度假|旅行|trip|travel|音乐|电影|game|游戏|TV|电视)\b/i,
+    category_path: 'reflections/daily',
+  },
+};
+
+function detectScene(text) {
+  for (const [scene, config] of Object.entries(SCENES)) {
+    if (config.keywords.test(text)) {
+      return { scene, category_path: config.category_path };
+    }
+  }
+  return { scene: 'general', category_path: 'general/default' };
+}
+
+// ── Preload Memory ─────────────────────────────────────────
+
+function httpGet(url) {
+  return new Promise(resolve => {
+    const urlObj = new URL(url);
+    const req = http.request({
+      hostname: urlObj.hostname,
+      port: urlObj.port || 18998,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+    }, res => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
+async function loadPreloadMemories(category_path, token) {
+  if (category_path === 'general/default') return { memories: [] };
+  // Use generic 'memory' query to avoid early-return in recall
+  const url = `http://localhost:18998/recall?q=memory&limit=3&category_path=${encodeURIComponent(category_path)}&use_insights=true&token=${encodeURIComponent(token)}`;
+  return await httpGet(url) || { memories: [] };
+}
+
+function writePreloadFile(sessionId, scene, category_path, recallResult) {
+  const preloadDir = path.join(process.env.HOME || '', '.amber-hunter', 'preload');
+  if (!fs.existsSync(preloadDir)) fs.mkdirSync(preloadDir, { recursive: true });
+  const file = path.join(preloadDir, `${sessionId}_preload.json`);
+
+  // Handle both insight (type=insight) and capsule (memories array) responses
+  let memories = [];
+  let insight = null;
+  if (recallResult && recallResult.type === 'insight') {
+    insight = {
+      summary: recallResult.summary,
+      source_ids: recallResult.source_ids,
+      path: recallResult.path,
+      count: recallResult.count,
+    };
+    memories = [];  // insight carries its own summary
+  } else if (recallResult && Array.isArray(recallResult.memories)) {
+    memories = recallResult.memories;
+  }
+
+  const payload = { scene, category_path, memories, insight, loaded_at: Date.now() };
+  fs.writeFileSync(file, JSON.stringify(payload, null, 2));
+  log(`[preload] scene=${scene} path=${category_path} insight=${insight ? 'yes' : 'no'} memories=${memories.length} session=${sessionId}`);
+}
+
 // ── Signal Patterns v1.2.13 ─────────────────────────────────
 const SIGNALS = {
   // 显式要求记住
@@ -128,12 +220,21 @@ async function main() {
   const combined = `${userMessage}\n${response}`.trim();
   if (combined.length < 20) { process.exit(0); }
 
-  const signals = detectSignals(combined);
-  if (signals.length === 0) { process.exit(0); }
-
   const cfg = readConfig();
   const token = cfg.api_key || cfg.apiToken;
   if (!token) { log('No api_key, skip'); process.exit(0); }
+
+  // ── B3: 场景检测 + 预加载记忆 v1.2.18 ───────────────────
+  // 预加载独立运行，不管有没有信号都触发
+  const sceneInfo = detectScene(combined);
+  if (sceneInfo.scene !== 'general') {
+    const preload = await loadPreloadMemories(sceneInfo.category_path, token);
+    writePreloadFile(event.sessionKey || 'unknown', sceneInfo.scene, sceneInfo.category_path, preload);
+  }
+
+  // 信号检测 + 推送（仅当有信号时）
+  const signals = detectSignals(combined);
+  if (signals.length === 0) { process.exit(0); }
 
   // Field mapping: memo=完整句子, context=上下文, tags=话题分类
   const types = [...new Set(signals.map(s => s.type))];
@@ -144,12 +245,13 @@ async function main() {
     tags: types.join(','),
     session_id: event.sessionKey || null,
     source: 'openclaw-proactive',
-    review_required: true,   // v1.2.13: 必须经过审核
+    review_required: true,
     confidence: 0.8,
   };
 
-  const ok = await httpPost('/ingest', capsule, token);  // v1.2.13: 改用 /ingest
+  const ok = await httpPost('/ingest', capsule, token);
   log(`amber-proactive: ${ok ? 'captured' : 'failed'} — ${types.join('+')}`);
+
   process.exit(0);
 }
 
