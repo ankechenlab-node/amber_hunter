@@ -20,6 +20,7 @@ class CapsuleUpdate(BaseModel):
     memo: Optional[str] = None
     tags: Optional[str] = None
     category: Optional[str] = None
+    category_path: Optional[str] = None
 
 
 class CapsuleRecord(BaseModel):

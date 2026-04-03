@@ -55,6 +55,45 @@ def _extract_bearer_token(request, authorization: str = None) -> str:
     return raw_token
 
 
+# ── MFS 路径推断 v1.2.11 ─────────────────────────────────
+# 分级路径索引：按 category_path 组织胶囊，支持路径前缀搜索
+
+_MFS_PATH_KEYWORDS = {
+    "projects/amber-hunter": ["amber-hunter", "skill", "openclaw", "mcp", "amber hunter"],
+    "projects/huper": ["huper", "琥珀", "huper.org", "网站", "部署", "nginx"],
+    "projects/wake-fog": ["wake-fog", "品牌", "品牌项目"],
+    "knowledge/python": ["python", "pip", "venv", "import", "pip install", "conda"],
+    "knowledge/devops": ["ssh", "linux", "docker", "systemctl", "nginx", "vps", "部署"],
+    "knowledge/llm": ["gpt", "claude", "gemini", "模型", "token", "prompt", "llm", "openai"],
+    "knowledge/macos": ["macos", "homebrew", "brew", "osx"],
+    "reflections/daily": ["今天", "复盘", "总结", "日报", "每日", "daily"],
+    "reflections/weekly": ["本周", "周总结", "weekly", "周报"],
+    "context/vps-sessions": ["ssh", "root@", "vps", "sshpass", "服务器"],
+    "context/error-debugs": ["错误", "bug", "error", "调试", "修复", "exception", "failed"],
+    "people/leo": ["leo", "chen", "安克"],
+    "creative/writing": ["写作", "文章", "blog", "post"],
+}
+
+def _infer_category_path(memo: str, content: str = "", tags: str = "") -> str:
+    """
+    根据胶囊内容自动推断 category_path。
+    返回最匹配的路径，默认为 'general/default'。
+    """
+    full_text = f"{memo} {content} {tags}".lower()
+
+    best_match = "general/default"
+    best_score = 0
+
+    for path, keywords in _MFS_PATH_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw.lower() in full_text)
+        if score > best_score:
+            best_score = score
+            best_match = path
+
+    return best_match
+
+
+
 # ── 本地轻量标签生成（无需网络/ML，关键词匹配）────────────────────────
 # ── v0.8.9: 可扩展 Topic 分类系统 ─────────────────────────
 
@@ -840,6 +879,9 @@ def update_capsule(
     if body.category is not None:
         updates.append("category = ?")
         values.append(body.category)
+    if body.category_path is not None:
+        updates.append("category_path = ?")
+        values.append(body.category_path)
 
     if updates:
         values.append(capsule_id)
@@ -860,6 +902,7 @@ def recall_memories(
     limit: int = 3,
     mode: str = "auto",
     rerank: bool = False,
+    category_path: str = "",
     authorization: str = Header(None),
 ):
     """
@@ -870,6 +913,7 @@ def recall_memories(
       limit: 返回记忆数量（默认 3）
       mode: keyword | semantic | auto/hybrid（默认 auto）
       rerank: 是否用 LLM 重排序（默认 False，LLM调用昂贵）
+      category_path: MFS路径过滤（如 "projects/huper"），支持前缀匹配
 
     v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
     """
@@ -882,17 +926,27 @@ def recall_memories(
 
     q_lower = q.lower().strip()
 
-    # ── 读取所有胶囊（含 category）────────────────
+    # ── 读取所有胶囊（含 category_path）────────────────
     conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
     c = conn.cursor()
-    rows = c.execute(
-        "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced,source_type,category "
-        "FROM capsules ORDER BY created_at DESC LIMIT 300"
-    ).fetchall()
+
+    # category_path 前缀过滤（支持路径路由）
+    if category_path:
+        # 例如 category_path="projects" 时匹配 "projects/huper" 和 "projects/amber-hunter"
+        rows = c.execute(
+            "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced,source_type,category,category_path "
+            "FROM capsules WHERE category_path LIKE ? || '%' ORDER BY created_at DESC LIMIT 300",
+            (category_path,)
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT id,memo,content,tags,session_id,window_title,url,created_at,salt,nonce,synced,source_type,category,category_path "
+            "FROM capsules ORDER BY created_at DESC LIMIT 300"
+        ).fetchall()
     conn.close()
 
     keys = ["id","memo","content","tags","session_id","window_title","url",
-            "created_at","salt","nonce","synced","source_type","category"]
+            "created_at","salt","nonce","synced","source_type","category","category_path"]
     capsules_raw = [dict(zip(keys, r)) for r in rows]
 
     # ── v1.2.10+: keyword模式两阶段：先用memo+tags预筛，避免全量解密 ──
@@ -1105,6 +1159,7 @@ def recall_memories(
             "content":         plain[:500],
             "tags":            tags,
             "category":        cat,
+            "category_path":    cap.get("category_path", "general/default"),
             "source_type":     cap.get("source_type", ""),
             "created_at":      created,
             "relevance_score": round(score, 3),
@@ -1414,6 +1469,9 @@ def ingest_memory(body: IngestIn, request: Request = None,
         agent_part = _normalize_tags(body.agent_tag)
         final_tags = f"{final_tags},agent:{agent_part}" if final_tags else f"agent:{agent_part}"
 
+    # 推断 category_path（MFS 路径）
+    category_path = _infer_category_path(body.memo, body.context or "", final_tags)
+
     if is_first_ingest:
         # 先插入3条样例记忆（仅首次）
         _insert_sample_memories()
@@ -1430,6 +1488,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
             created_at=time.time(),
             source_type="ai_chat",
             category=category,
+            category_path=category_path,
         )
         return JSONResponse({
             "queued": False,
@@ -1453,6 +1512,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
             created_at=time.time(),
             source_type="ai_chat",
             category=category,
+            category_path=category_path,
         )
         return JSONResponse({"queued": False, "capsule_id": cap_id,
                              "message": "Saved directly"}, headers=h)
@@ -1503,6 +1563,7 @@ def approve_queue_item(qid: str, request: Request = None,
         return JSONResponse({"error": "already processed"}, status_code=400, headers=h)
 
     cap_id = secrets.token_hex(8)
+    cap_path = _infer_category_path(item["memo"], item.get("context") or "", item["tags"])
     insert_capsule(
         capsule_id=cap_id,
         memo=item["memo"],
@@ -1514,6 +1575,7 @@ def approve_queue_item(qid: str, request: Request = None,
         created_at=time.time(),
         source_type="ai_chat",
         category=item["category"],
+        category_path=cap_path,
     )
     queue_set_status(qid, "approved")
     return JSONResponse({"capsule_id": cap_id, "message": "Approved and saved"}, headers=h)
@@ -1641,6 +1703,7 @@ def review_item(qid: str, request: Request = None, authorization: str = Header(N
 
     if action == "approve":
         cap_id = secrets.token_hex(8)
+        cap_path = _infer_category_path(item["memo"], item.get("context") or "", item["tags"])
         insert_capsule(
             capsule_id=cap_id,
             memo=item["memo"],
@@ -1652,6 +1715,7 @@ def review_item(qid: str, request: Request = None, authorization: str = Header(N
             created_at=time.time(),
             source_type="ai_chat",
             category=item["category"],
+            category_path=cap_path,
         )
         queue_set_status(qid, "approved")
         return JSONResponse({"capsule_id": cap_id, "action": "approved"}, headers=h)

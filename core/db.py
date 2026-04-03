@@ -78,6 +78,13 @@ def init_db():
         except Exception:
             pass
 
+    # v1.2.11+: category_path for MFS hierarchical indexing
+    for col in ["category_path TEXT DEFAULT 'general/default'"]:
+        try:
+            c.execute(f"ALTER TABLE capsules ADD COLUMN {col}")
+        except Exception:
+            pass
+
     # v1.2.8+: memory_hits — record each recall usage
     c.execute("""
         CREATE TABLE IF NOT EXISTS memory_hits (
@@ -96,6 +103,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_capsules_created_at ON capsules(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_capsules_session_id ON capsules(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_capsules_category ON capsules(category)",
+        "CREATE INDEX IF NOT EXISTS idx_capsules_category_path ON capsules(category_path)",
         "CREATE INDEX IF NOT EXISTS idx_memory_queue_status ON memory_queue(status)",
         "CREATE INDEX IF NOT EXISTS idx_memory_queue_created_at ON memory_queue(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_memory_hits_capsule_id ON memory_hits(capsule_id)",
@@ -124,6 +132,7 @@ def insert_capsule(
     content_hash: str | None = None,
     source_type: str = "manual",
     category: str = "",
+    category_path: str = "general/default",
 ) -> bool:
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
@@ -131,11 +140,11 @@ def insert_capsule(
         c.execute("""
             INSERT INTO capsules
               (id,memo,content,tags,session_id,window_title,url,created_at,
-               salt,nonce,encrypted_len,content_hash,synced,source_type,category)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (capsule_id, memo, content, tags, session_id, window_title,
               url, created_at, salt, nonce, encrypted_len, content_hash,
-              0, source_type, category))
+              0, source_type, category, category_path))
         conn.commit()
         return True
     finally:
@@ -148,14 +157,14 @@ def get_capsule(capsule_id: str) -> dict | None:
     try:
         row = c.execute(
             "SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-            "salt,nonce,encrypted_len,content_hash,synced,source_type,category "
+            "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path "
             "FROM capsules WHERE id=?", (capsule_id,)
         ).fetchone()
         if not row:
             return None
         keys = ["id","memo","content","tags","session_id","window_title","url",
                 "created_at","salt","nonce","encrypted_len","content_hash","synced",
-                "source_type","category"]
+                "source_type","category","category_path"]
         return dict(zip(keys, row))
     finally:
         conn.close()
@@ -166,12 +175,12 @@ def list_capsules(limit: int = 50) -> list[dict]:
     c = conn.cursor()
     rows = c.execute(
         "SELECT id,memo,content,tags,session_id,window_title,created_at,"
-        "salt,nonce,synced,source_type,category "
+        "salt,nonce,synced,source_type,category,category_path "
         "FROM capsules ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
     conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","created_at",
-            "salt","nonce","synced","source_type","category"]
+            "salt","nonce","synced","source_type","category","category_path"]
     return [dict(zip(keys, r)) for r in rows]
 
 
@@ -188,13 +197,13 @@ def get_unsynced_capsules() -> list[dict]:
     c = conn.cursor()
     rows = c.execute(
         "SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-        "salt,nonce,encrypted_len,content_hash,synced,source_type,category "
+        "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path "
         "FROM capsules WHERE synced=0"
     ).fetchall()
     conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","url",
             "created_at","salt","nonce","encrypted_len","content_hash","synced",
-            "source_type","category"]
+            "source_type","category","category_path"]
     return [dict(zip(keys, r)) for r in rows]
 
 
