@@ -37,6 +37,7 @@ from starlette.responses import Response
 
 # ── 语义模型缓存（模块级，只加载一次）────────────────────
 _EMBED_MODEL = None
+_SEMANTIC_AVAILABLE = None  # 缓存语义搜索可用性检查结果
 
 
 # ── 通用辅助函数 ─────────────────────────────────────────
@@ -191,14 +192,16 @@ def _save_llm_config(config: dict):
 
 def _get_embed_model():
     """懒加载向量模型（all-MiniLM-L6-v2）."""
-    global _EMBED_MODEL
+    global _EMBED_MODEL, _SEMANTIC_AVAILABLE
     if _EMBED_MODEL is not None:
         return _EMBED_MODEL
     try:
         from sentence_transformers import SentenceTransformer
         _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        _SEMANTIC_AVAILABLE = True
         return _EMBED_MODEL
     except Exception:
+        _SEMANTIC_AVAILABLE = False
         return None
 
 
@@ -969,11 +972,9 @@ def recall_memories(
     if mode in ("auto", "semantic", "hybrid"):
         try:
             import numpy as _np
-            global _EMBED_MODEL
-            if _EMBED_MODEL is None:
-                from sentence_transformers import SentenceTransformer
-                _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-            model = _EMBED_MODEL
+            model = _get_embed_model()
+            if model is None:
+                raise ImportError("embedding model not available")
             q_vec = model.encode(q)
             texts = [c["_text"][:512] for c in parsed]
             if texts:
@@ -1259,12 +1260,17 @@ async def rerank_memories(request: Request, authorization: str = Header(None)):
 
 
 def _semantic_available() -> bool:
-    """检查是否安装了语义搜索依赖"""
+    """检查是否安装了语义搜索依赖（带缓存）"""
+    global _SEMANTIC_AVAILABLE
+    if _SEMANTIC_AVAILABLE is not None:
+        return _SEMANTIC_AVAILABLE
     try:
         import sentence_transformers as _
         import numpy as _
+        _SEMANTIC_AVAILABLE = True
         return True
     except ImportError:
+        _SEMANTIC_AVAILABLE = False
         return False
 
 
