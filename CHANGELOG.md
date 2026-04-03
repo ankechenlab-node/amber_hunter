@@ -1,3 +1,8 @@
+## [v1.2.17] — 2026-04-04
+
+### Fixed
+- **P0-1: proactive capture 字段映射错误** — `handler.ts/js` 发送 `content` 但 IngestIn 期待 `context`；`memo` 从正则匹配文本改为完整句子；`snippet` 现在正确传入 `context` 字段；解决了琥珀只有一句话、没有上下文的问题
+
 ## [v1.2.16] — 2026-04-04
 
 ### Added

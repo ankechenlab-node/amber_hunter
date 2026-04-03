@@ -98,14 +98,16 @@ function httpPost(apiPath, body, token) {
 
 function detectSignals(text) {
   const results = [];
-  const lower = text.toLowerCase();
   for (const [type, patterns] of Object.entries(SIGNALS)) {
     for (const pattern of patterns) {
-      const m = lower.match(pattern);
+      const m = text.match(pattern);
       if (m) {
-        const idx = m.index || 0;
-        const snippet = text.slice(Math.max(0, idx - 40), idx + 80).trim();
-        results.push({ type, matched: m[0], snippet });
+        const matchIdx = m.index || 0;
+        const snippet = text.slice(Math.max(0, matchIdx - 40), matchIdx + m[0].length + 80).trim();
+        // Extract the full sentence containing the match
+        const sentenceMatch = snippet.match(/[^.。!！?？\n]{10,}(?:[.。!！?？]|$)/);
+        const sentence = sentenceMatch ? sentenceMatch[0].trim() : m[0];
+        results.push({ type, matched: m[0], snippet, sentence });
         break;
       }
     }
@@ -133,10 +135,12 @@ async function main() {
   const token = cfg.api_key || cfg.apiToken;
   if (!token) { log('No api_key, skip'); process.exit(0); }
 
+  // Field mapping: memo=完整句子, context=上下文, tags=话题分类
   const types = [...new Set(signals.map(s => s.type))];
+  const memo = signals[0].sentence;
   const capsule = {
-    memo: `[Proactive] ${types.join(' + ')}: ${signals[0].matched.slice(0, 60)}`,
-    content: signals.map(s => s.snippet).join('\n---\n').slice(0, 1000),
+    memo,
+    context: signals.map(s => s.snippet).join('\n---\n').slice(0, 1000),
     tags: types.join(','),
     session_id: event.sessionKey || null,
     source: 'openclaw-proactive',

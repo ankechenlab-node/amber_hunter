@@ -97,15 +97,18 @@ async function httpPost(apiPath: string, body: object, token: string): Promise<b
   });
 }
 
-function detectSignals(text: string): Array<{type: string; matched: string; snippet: string}> {
+function detectSignals(text: string): Array<{type: string; matched: string; snippet: string; sentence: string}> {
   const results = [];
-  const lower = text.toLowerCase();
   for (const [type, patterns] of Object.entries(SIGNALS)) {
     for (const pattern of patterns) {
-      const m = lower.match(pattern);
+      const m = text.match(pattern);
       if (m) {
-        const snippet = text.slice(Math.max(0, m.index! - 40), m.index! + 80).trim();
-        results.push({ type, matched: m[0], snippet });
+        const matchIdx = m.index!;
+        const snippet = text.slice(Math.max(0, matchIdx - 40), matchIdx + m[0].length + 80).trim();
+        // Extract the full sentence containing the match
+        const sentenceMatch = snippet.match(/[^.。!！?？\n]{10,}(?:[.。!！?？]|$)/);
+        const sentence = sentenceMatch ? sentenceMatch[0].trim() : m[0];
+        results.push({ type, matched: m[0], snippet, sentence });
         break; // one signal per type max
       }
     }
@@ -136,11 +139,13 @@ async function main() {
   if (!token) { log('No api_key in config, skipping'); process.exit(0); }
 
   // Build capsule payload → POST to /ingest (requires review)
+  // Field mapping: memo=完整句子, context=上下文, tags=话题分类
   const types = [...new Set(signals.map(s => s.type))];
   const snippet = signals.map(s => s.snippet).join(' | ');
+  const memo = signals[0].sentence;
   const capsule = {
-    memo: `[Proactive] ${types.join(' + ')}: ${signals[0].matched}`,
-    content: snippet.slice(0, 1000),
+    memo,
+    context: snippet.slice(0, 1000),
     tags: types.join(','),
     session_id: event.sessionKey || null,
     source: 'openclaw-proactive',
