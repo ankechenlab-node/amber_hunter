@@ -1,3 +1,33 @@
+## [v1.2.11] — 2026-04-03
+
+### Added
+- **MFS路径索引** — `category_path`字段，支持分级路径过滤；`_infer_category_path()`自动推断；recall支持`category_path`参数前缀匹配
+
+### Changed
+- **数据库索引** — 添加`idx_capsules_category_path`等7个常用索引
+
+### Performance
+- **recall两阶段解密优化** — keyword模式先用memo+tags预筛top50再解密，减少~83%AES解密操作
+- **语义模型缓存** — `_SEMANTIC_AVAILABLE`缓存标志，避免每次import检查
+- **DB连接池基础** — thread-local连接缓存，recall使用pooled连接
+
+---
+
+## [v1.2.10] — 2026-04-03
+
+### Added
+- **LLM自动检测** — `detect_current_llm()`从OpenClaw配置自动检测当前模型
+- **PATCH端点** — `PATCH /capsules/{id}`支持部分更新(memo/tags/category)
+- **Silent exception日志** — 关键位置添加错误日志
+
+### Changed
+- **Token提取DRY** — 提取`_extract_bearer_token()`辅助函数，消除15+处重复代码
+- **recall rerank默认False** — 节省LLM配额
+- **Config统一** — amber_hunter.py改用core.llm的load_llm_config()，消除双config问题
+- **CORS middleware** — 添加PATCH支持，简化add_cors_headers
+
+---
+
 ## [v1.2.9] — 2026-04-03
 
 ### Added
