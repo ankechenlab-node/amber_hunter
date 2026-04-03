@@ -1,3 +1,12 @@
+## [v1.2.16] — 2026-04-04
+
+### Added
+- **/config GET 返回 `sync_interval_minutes`** — 云端同步间隔可配置（默认 30 分钟）
+- **/config POST 支持 `sync_interval_minutes`** — 持久化到 config，下次启动生效
+
+### Testing
+- **test_sync.py 新增 4 个可靠性测试** — `TestSyncReliability`: partial_info / retry / concurrent_guard / exception_reporting
+
 ## [v1.2.15] — 2026-04-03
 
 ### Fixed
