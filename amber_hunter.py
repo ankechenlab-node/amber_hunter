@@ -1823,7 +1823,7 @@ async def update_llm_config(request: Request, authorization: str = Header(None))
     body = await request.json()
     provider = body.get("provider")
     model = body.get("model")
-    if provider not in ("minimax", "openai", "claude", "local"):
+    if provider not in ("minimax", "openai", "claude", "local", "groq", "gemini"):
         return JSONResponse({"error": "invalid provider"}, status_code=400)
     config = _get_llm_config()
     if provider:

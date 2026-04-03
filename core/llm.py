@@ -459,6 +459,177 @@ class LocalProvider(LLMProvider):
             return self._json_error(f"JSON parse failed: {e}", raw=text[:500])
 
 
+# ---------------------------------------------------------------------------
+# Groq Provider
+# ---------------------------------------------------------------------------
+
+class GroqProvider(LLMProvider):
+    """
+    Groq API via OpenAI-compatible endpoint.
+    API: https://api.groq.com/openai/v1/chat/completions
+    """
+
+    DEFAULT_URL = "https://api.groq.com/openai/v1/chat/completions"
+    DEFAULT_MODEL = "mixtral-8x7b-32768"
+
+    def provider_name(self) -> str:
+        return "groq"
+
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        if not self.config.api_key:
+            return self._error("No API key configured")
+
+        base_url = self.config.base_url or self.DEFAULT_URL
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self.config.model or self.DEFAULT_MODEL,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        cmd = [
+            "curl", "-s", "--ipv4",
+            "-X", "POST", base_url,
+            "-H", f"Authorization: Bearer {self.config.api_key}",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(payload),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.config.timeout
+            )
+            if result.returncode != 0:
+                return self._error(f"curl exit {result.returncode}: {result.stderr[:100]}")
+
+            data = json.loads(result.stdout)
+            if "error" in data:
+                return self._error(str(data["error"]))
+
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+            return ""
+
+        except json.JSONDecodeError:
+            return self._error(f"Invalid JSON response: {result.stdout[:200]}")
+        except subprocess.TimeoutExpired:
+            return self._error(f"Timeout after {self.config.timeout}s")
+        except Exception as e:
+            return self._error(str(e))
+
+    def complete_json(self, prompt: str, system: str = None) -> dict:
+        text = self.complete(prompt, system)
+        if text.startswith("[ERROR"):
+            return self._json_error(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            return self._json_error(f"JSON parse failed: {e}", raw=text[:500])
+
+
+# ---------------------------------------------------------------------------
+# Gemini Provider
+# ---------------------------------------------------------------------------
+
+class GeminiProvider(LLMProvider):
+    """
+    Google Gemini API via AI Studio.
+    API: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+    """
+
+    DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+    DEFAULT_MODEL = "gemini-1.5-flash"
+
+    def provider_name(self) -> str:
+        return "gemini"
+
+    def complete(
+        self,
+        prompt: str,
+        system: str = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        if not self.config.api_key:
+            return self._error("No API key configured")
+
+        model = self.config.model or self.DEFAULT_MODEL
+        base_url = self.config.base_url or f"{self.DEFAULT_URL}/{model}:generateContent"
+
+        # Build contents payload
+        contents = [{"parts": [{"text": prompt}]}]
+        if system:
+            # Gemini uses system_instruction in the request body
+            system_instruction = {"parts": [{"text": system}]}
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            },
+        }
+        if system:
+            payload["system_instruction"] = system_instruction
+
+        cmd = [
+            "curl", "-s", "--ipv4",
+            "-X", "POST", base_url,
+            "-H", f"x-goog-api-key: {self.config.api_key}",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps(payload),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.config.timeout
+            )
+            if result.returncode != 0:
+                return self._error(f"curl exit {result.returncode}: {result.stderr[:100]}")
+
+            data = json.loads(result.stdout)
+            if "error" in data:
+                return self._error(str(data["error"]))
+
+            # Gemini returns: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
+            candidates = data.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if parts:
+                    return parts[0].get("text", "").strip()
+            return ""
+
+        except json.JSONDecodeError:
+            return self._error(f"Invalid JSON response: {result.stdout[:200]}")
+        except subprocess.TimeoutExpired:
+            return self._error(f"Timeout after {self.config.timeout}s")
+        except Exception as e:
+            return self._error(str(e))
+
+    def complete_json(self, prompt: str, system: str = None) -> dict:
+        text = self.complete(prompt, system)
+        if text.startswith("[ERROR"):
+            return self._json_error(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            return self._json_error(f"JSON parse failed: {e}", raw=text[:500])
+
+
 # Module-level flag: True if this module loaded without fatal errors
 LLM_AVAILABLE = True
 
@@ -469,8 +640,10 @@ LLM_AVAILABLE = True
 _PROVIDERS = {
     "minimax": MiniMaxProvider,
     "openai": OpenAIProvider,
-    "claude": ClaudeProvider,  # Phase 1: NEW
+    "claude": ClaudeProvider,
     "local": LocalProvider,
+    "groq": GroqProvider,
+    "gemini": GeminiProvider,
 }
 
 
