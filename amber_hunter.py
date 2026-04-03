@@ -2030,15 +2030,18 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
 # ── 配置读取（Dashboard 用）────────────────────────────
 class ConfigIn(BaseModel):
     auto_sync: Optional[bool] = None
+    sync_interval_minutes: Optional[int] = None  # P3-13
 
 @app.get("/config")
 def get_config_handler(request: Request, authorization: str = Header(None)):
-    """获取配置（auto_sync 等）"""
+    """获取配置（auto_sync、sync_interval_minutes 等）"""
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     auto_sync = get_config("auto_sync")
+    sync_interval = get_config("sync_interval_minutes")
     return JSONResponse({
         "auto_sync": auto_sync == "true",
+        "sync_interval_minutes": int(sync_interval) if sync_interval else 30,
     }, headers=add_cors_headers(request))
 
 @app.post("/config")
@@ -2048,6 +2051,8 @@ def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = 
     verify_token(raw_token)
     if cfg_in.auto_sync is not None:
         set_config("auto_sync", "true" if cfg_in.auto_sync else "false")
+    if cfg_in.sync_interval_minutes is not None:
+        set_config("sync_interval_minutes", str(cfg_in.sync_interval_minutes))
     return JSONResponse({"ok": True}, headers=add_cors_headers(request))
 
 @app.get("/config/llm")
