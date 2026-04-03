@@ -38,6 +38,22 @@ from starlette.responses import Response
 # ── 语义模型缓存（模块级，只加载一次）────────────────────
 _EMBED_MODEL = None
 
+
+# ── 通用辅助函数 ─────────────────────────────────────────
+def _extract_bearer_token(request, authorization: str = None) -> str:
+    """
+    从请求中提取 Bearer token。
+    优先级：query_param.token > Authorization header
+    返回格式化的 'Bearer xxx' 字符串。
+    """
+    raw_token = request.query_params.get("token") if request else None
+    if not raw_token:
+        raw_token = authorization
+    else:
+        raw_token = f"Bearer {raw_token}"
+    return raw_token
+
+
 # ── 本地轻量标签生成（无需网络/ML，关键词匹配）────────────────────────
 # ── v0.8.9: 可扩展 Topic 分类系统 ─────────────────────────
 
@@ -635,11 +651,7 @@ def trigger_freeze(request: Request, authorization: str = Header(None)):
         return JSONResponse({}, headers=h)
 
     # 优先从 query param 读取 token（兼容混合内容场景）
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"  # verify_token 期望 Bearer 前缀
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     session_key = get_current_session_key()
     session_data = build_session_summary(session_key) if session_key else {}
@@ -841,11 +853,7 @@ def recall_memories(
 
     v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
     """
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
 
     if not q or len(q.strip()) < 2:
@@ -1230,11 +1238,7 @@ async def rerank_memories(request: Request, authorization: str = Header(None)):
     Body: {"query": "...", "memories": [...]}
     Returns: {"memories": [...reranked...]}
     """
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
 
     try:
@@ -1371,11 +1375,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
     - 其余 → 写入 memory_queue 等待用户审核
     支持 Bearer header 或 ?token= query param。
     """
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
 
     h = add_cors_headers(request) if request else {}
@@ -1452,11 +1452,7 @@ def ingest_memory(body: IngestIn, request: Request = None,
 @app.get("/queue")
 def get_queue(request: Request = None, authorization: str = Header(None)):
     """列出待审核记忆"""
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
     pending = queue_list_pending()
@@ -1473,11 +1469,7 @@ class QueueEditIn(BaseModel):
 def approve_queue_item(qid: str, request: Request = None,
                        authorization: str = Header(None)):
     """接受待审核记忆 → 写入 capsules"""
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
@@ -1508,11 +1500,7 @@ def approve_queue_item(qid: str, request: Request = None,
 def reject_queue_item(qid: str, request: Request = None,
                       authorization: str = Header(None)):
     """忽略待审核记忆"""
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
@@ -1527,11 +1515,7 @@ def reject_queue_item(qid: str, request: Request = None,
 def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
                     authorization: str = Header(None)):
     """编辑后接受待审核记忆"""
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
@@ -1581,11 +1565,7 @@ def review_queue(request: Request = None, authorization: str = Header(None)):
     终端友好的待审核记忆列表。
     curl "http://localhost:18998/-review?token=$TOKEN"
     """
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
@@ -1622,11 +1602,7 @@ def review_item(qid: str, request: Request = None, authorization: str = Header(N
     curl -X POST "http://localhost:18998/-review/abc123?action=approve&token=$TOKEN"
     curl -X POST "http://localhost:18998/-review/abc123?action=reject&token=$TOKEN"
     """
-    raw_token = request.query_params.get("token") if request else None
-    if raw_token:
-        raw_token = f"Bearer {raw_token}"
-    else:
-        raw_token = authorization
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
@@ -1771,11 +1747,7 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
     - content 已圤本地加密，直接传输密文，无需解密
     - 服务端永远看不到任何明文内容
     """
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
 
     api_token = get_api_token()
@@ -1808,11 +1780,7 @@ class ConfigIn(BaseModel):
 @app.get("/config")
 def get_config_handler(request: Request, authorization: str = Header(None)):
     """获取配置（auto_sync 等）"""
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     auto_sync = get_config("auto_sync")
     return JSONResponse({
@@ -1822,11 +1790,7 @@ def get_config_handler(request: Request, authorization: str = Header(None)):
 @app.post("/config")
 def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = Header(None)):
     """更新配置"""
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     if cfg_in.auto_sync is not None:
         set_config("auto_sync", "true" if cfg_in.auto_sync else "false")
@@ -1835,11 +1799,7 @@ def set_config_handler(cfg_in: ConfigIn, request: Request, authorization: str = 
 @app.get("/config/llm")
 async def get_llm_config(request: Request, authorization: str = Header(None)):
     """获取当前 LLM provider 配置（不返回 api_key 明文）"""
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     config = _get_llm_config()
     safe_config = {
@@ -1852,11 +1812,7 @@ async def get_llm_config(request: Request, authorization: str = Header(None)):
 @app.put("/config/llm")
 async def update_llm_config(request: Request, authorization: str = Header(None)):
     """更新 LLM provider 配置"""
-    raw_token = request.query_params.get("token")
-    if not raw_token:
-        raw_token = authorization
-    else:
-        raw_token = f"Bearer {raw_token}"
+    raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     body = await request.json()
     provider = body.get("provider")
