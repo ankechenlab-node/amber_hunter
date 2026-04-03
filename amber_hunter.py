@@ -842,7 +842,7 @@ def recall_memories(
     q: str = "",
     limit: int = 3,
     mode: str = "auto",
-    rerank: bool = True,
+    rerank: bool = False,
     authorization: str = Header(None),
 ):
     """
@@ -852,7 +852,7 @@ def recall_memories(
       q: 搜索查询（用户当前消息）
       limit: 返回记忆数量（默认 3）
       mode: keyword | semantic | auto/hybrid（默认 auto）
-      rerank: 是否用 LLM 重排序（默认 True）
+      rerank: 是否用 LLM 重排序（默认 False，LLM调用昂贵）
 
     v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
     """
