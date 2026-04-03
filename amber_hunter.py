@@ -25,7 +25,7 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, mark_s
     save_tag_feedback, get_tag_feedback)
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn
-from core.llm import get_llm, LLM_AVAILABLE as LLM_READY
+from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
 
 # ── FastAPI ─────────────────────────────────────────────
 import uvicorn
@@ -164,30 +164,6 @@ def _get_topics_from_config() -> list[dict]:
     except Exception:
         pass
     return DEFAULT_TOPICS
-
-
-import json as _json
-
-def _get_llm_config() -> dict:
-    """读取 config.json 中的 llm 配置."""
-    config_path = Path(__file__).parent / "config.json"
-    try:
-        with open(config_path) as f:
-            return _json.load(f).get("llm", {})
-    except:
-        return {"provider": "minimax"}
-
-def _save_llm_config(config: dict):
-    """保存 llm 配置到 config.json."""
-    config_path = Path(__file__).parent / "config.json"
-    try:
-        with open(config_path) as f:
-            full = _json.load(f)
-    except:
-        full = {}
-    full["llm"] = config
-    with open(config_path, "w") as f:
-        _json.dump(full, f, indent=2)
 
 
 def _get_embed_model():
@@ -1848,11 +1824,11 @@ async def get_llm_config(request: Request, authorization: str = Header(None)):
     """获取当前 LLM provider 配置（不返回 api_key 明文）"""
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
-    config = _get_llm_config()
+    cfg = load_llm_config()
     safe_config = {
-        "provider": config.get("provider", "minimax"),
-        "model": config.get("model", ""),
-        "base_url": config.get("base_url", ""),
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "base_url": cfg.base_url,
     }
     return JSONResponse(safe_config, headers=add_cors_headers(request))
 
@@ -1864,15 +1840,15 @@ async def update_llm_config(request: Request, authorization: str = Header(None))
     body = await request.json()
     provider = body.get("provider")
     model = body.get("model")
-    if provider not in ("minimax", "openai", "claude", "local", "groq", "gemini"):
+    if provider not in ("minimax", "openai", "claude", "local"):
         return JSONResponse({"error": "invalid provider"}, status_code=400)
-    config = _get_llm_config()
+    cfg = load_llm_config()
     if provider:
-        config["provider"] = provider
+        cfg.provider = provider
     if model:
-        config["model"] = model
-    _save_llm_config(config)
-    return JSONResponse({"ok": True, "provider": config.get("provider")}, headers=add_cors_headers(request))
+        cfg.model = model
+    save_llm_config(cfg)
+    return JSONResponse({"ok": True, "provider": cfg.provider}, headers=add_cors_headers(request))
 
 # ── master_password 设置（Dashboard 用）────────────────
 from pydantic import BaseModel
