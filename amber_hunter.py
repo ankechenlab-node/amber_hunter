@@ -529,7 +529,7 @@ app.add_middleware(
     StarletteCORSMiddleware,
     allow_origins=["https://huper.org", "http://localhost:18998", "http://127.0.0.1:18998"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -561,9 +561,9 @@ ALLOWED_ORIGINS = [
 ]
 
 def add_cors_headers(request: Request):
-    """手动给 Response 添加 CORS 头（含 Private Network Access）"""
+    """手动给 Response 添加 CORS origin 头（private-network 由 middleware 处理）"""
     origin = request.headers.get("origin", "")
-    h = {"access-control-allow-private-network": "true"}
+    h = {}
     if origin in ALLOWED_ORIGINS:
         h["access-control-allow-origin"] = origin
         h["access-control-allow-credentials"] = "true"
