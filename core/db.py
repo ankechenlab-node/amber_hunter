@@ -326,7 +326,9 @@ def insert_memory_hit(
               search_query or None, relevance_score or None))
         conn.commit()
         return True
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"[db] insert_memory_hit failed: {e}", file=sys.stderr)
         return False
     finally:
         conn.close()

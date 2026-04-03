@@ -428,7 +428,9 @@ def _llm_extract_memories(text: str) -> list[dict]:
         filtered.sort(key=lambda x: x.get("importance", 0), reverse=True)
         return filtered[:10]
 
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"[_llm_extract_memories] failed: {e}", file=sys.stderr)
         return []
 
     topics = _get_topics_from_config()
@@ -900,7 +902,9 @@ def recall_memories(
                     key = derive_key(master_pw, salt)
                     plaintext = decrypt_content(ciphertext, key, nonce)
                     content = plaintext.decode("utf-8") if plaintext else ""
-                except Exception:
+                except Exception as e:
+                    import sys
+                    print(f"[recall] decrypt failed for {cap.get('id','?')}: {e}", file=sys.stderr)
                     content = ""
             cap["_text"] = f"{cap.get('memo','')}\n{content}"
             cap["_plain_content"] = content
@@ -921,7 +925,9 @@ def recall_memories(
                     key = derive_key(master_pw, salt)
                     plaintext = decrypt_content(ciphertext, key, nonce)
                     content = plaintext.decode("utf-8") if plaintext else ""
-                except Exception:
+                except Exception as e:
+                    import sys
+                    print(f"[recall] decrypt failed for {cap.get('id','?')}: {e}", file=sys.stderr)
                     content = ""
             cap["_text"] = f"{cap.get('memo','')}\n{content}"
             cap["_plain_content"] = content
@@ -1036,7 +1042,9 @@ def recall_memories(
         plain = cap.get("_plain_content", "") or ""
         try:
             related_map[cap["id"]] = _find_related(cap["id"], memo + " " + plain, tags, parsed, top_ids)
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f"[recall] _find_related failed for {cap.get('id','?')}: {e}", file=sys.stderr)
             related_map[cap["id"]] = []
 
     # ── 组装返回 ─────────────────────────────────
