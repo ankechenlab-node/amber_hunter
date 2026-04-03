@@ -2,6 +2,7 @@
 
 ### Added
 - **MFS路径索引** — `category_path`字段，支持分级路径过滤；`_infer_category_path()`自动推断；recall支持`category_path`参数前缀匹配
+- **历史胶囊批量归类** — `backfill_category_paths()`+`POST /admin/backfill-paths`端点，支持dry_run模式
 
 ### Changed
 - **数据库索引** — 添加`idx_capsules_category_path`等7个常用索引
