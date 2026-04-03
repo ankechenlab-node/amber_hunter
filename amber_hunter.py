@@ -835,6 +835,47 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
 
+
+@app.patch("/capsules/{capsule_id}")
+def update_capsule(
+    capsule_id: str,
+    body: CapsuleUpdate,
+    authorization: str = Header(None),
+    request: Request = None,
+):
+    """更新胶囊的 memo / tags / category（部分更新）"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    from core.db import get_capsule
+    existing = get_capsule(capsule_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="胶囊不存在")
+
+    # 只更新提供的字段
+    updates = []
+    values = []
+    if body.memo is not None:
+        updates.append("memo = ?")
+        values.append(body.memo)
+    if body.tags is not None:
+        updates.append("tags = ?")
+        values.append(body.tags)
+    if body.category is not None:
+        updates.append("category = ?")
+        values.append(body.category)
+
+    if updates:
+        values.append(capsule_id)
+        conn = sqlite3.connect(str(HOME / ".amber-hunter" / "hunter.db"))
+        conn.execute(f"UPDATE capsules SET {', '.join(updates)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+
+    h = add_cors_headers(request) if request else {}
+    return JSONResponse({"status": "ok"}, headers=h)
+
+
 # ── 主动回忆（需认证）──────────────────────────────────
 @app.get("/recall")
 def recall_memories(
