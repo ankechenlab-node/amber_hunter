@@ -2,6 +2,7 @@
 core/db.py — SQLite 数据库操作
 v1.1.9: 新增 source_type/category 列 + memory_queue 表
 v1.2.11: thread-local 连接缓存，减少连接开销
+v1.2.18: insights 表（压缩记忆摘要缓存）
 """
 from __future__ import annotations
 
@@ -125,6 +126,23 @@ def init_db():
             relevance_score  REAL
         )
     """)
+
+    # v1.2.17+: insights — compressed memory summaries by category_path
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS insights (
+            id               TEXT PRIMARY KEY,
+            capsule_ids      TEXT,          -- JSON array of source capsule IDs
+            summary          TEXT,           -- LLM-compressed summary
+            path             TEXT,          -- category_path
+            hotness_score   REAL DEFAULT 0,
+            created_at      REAL DEFAULT (strftime('%s', 'now')),
+            updated_at      REAL DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    try:
+        c.execute("CREATE INDEX IF NOT EXISTS idx_insights_path ON insights(path)")
+    except Exception:
+        pass
 
     # v1.2.10+: 常用查询索引
     for index_sql in [

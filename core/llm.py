@@ -132,6 +132,8 @@ class MiniMaxProvider(LLMProvider):
     def provider_name(self) -> str:
         return "minimax"
 
+    name = property(lambda self: self.provider_name())
+
     def complete(
         self,
         prompt: str,
@@ -226,6 +228,8 @@ class OpenAIProvider(LLMProvider):
     def provider_name(self) -> str:
         return "openai"
 
+    name = property(lambda self: self.provider_name())
+
     def complete(
         self,
         prompt: str,
@@ -303,6 +307,8 @@ class ClaudeProvider(LLMProvider):
 
     def provider_name(self) -> str:
         return "claude"
+
+    name = property(lambda self: self.provider_name())
 
     def _build_payload(
         self,
@@ -400,6 +406,8 @@ class LocalProvider(LLMProvider):
 
     def provider_name(self) -> str:
         return "local"
+
+    name = property(lambda self: self.provider_name())
 
     def complete(
         self,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.15
+Amber-Hunter v1.2.18
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
@@ -541,6 +541,54 @@ def _llm_extract_memories(text: str) -> list[dict]:
         print(f"[_llm_extract_memories] failed: {e}", file=sys.stderr)
         return []
 
+
+# ── Insight 缓存 v1.2.17 ──────────────────────────────────────────
+
+_INSIGHT_SYSTEM = """You are a memory analyst. Given a collection of memory capsules from the same category, generate a concise structured summary."""
+
+_INSIGHT_USER = """请将以下同路径的记忆胶囊压缩成一段有组织的摘要：
+
+{capsules}
+
+要求：
+- 保留核心事实、关键洞察和决策
+- 去除重复信息
+- 100字以内
+- 纯文本，不要列表
+- 用连贯的段落叙述"""
+
+
+def _generate_insight(path: str, capsule_ids: list[str], memos: list[str], hotness: float) -> dict | None:
+    """
+    压缩同路径胶囊为 insight 字典。
+    失败返回 None。
+    """
+    if not memos:
+        return None
+    try:
+        llm = get_llm()
+        capsules_text = "\n---\n".join(f"[{i+1}] {m}" for i, m in enumerate(memos))
+        prompt = _INSIGHT_USER.format(capsules=capsules_text[:3000])
+        summary = llm.complete(prompt, system=_INSIGHT_SYSTEM, max_tokens=256, temperature=0.2)
+        if summary.startswith("[ERROR"):
+            return None
+        import time as _time
+        import uuid as _uuid
+        return {
+            "id": _uuid.uuid4().hex[:12],
+            "capsule_ids": json.dumps(capsule_ids),
+            "summary": summary.strip(),
+            "path": path,
+            "hotness_score": hotness,
+            "created_at": _time.time(),
+            "updated_at": _time.time(),
+        }
+    except Exception as e:
+        import sys
+        print(f"[_generate_insight] failed: {e}", file=sys.stderr)
+        return None
+
+
     topics = _get_topics_from_config()
     text_lower = text.lower()
     candidate_topics = []
@@ -994,6 +1042,7 @@ def recall_memories(
     mode: str = "auto",
     rerank: bool = False,
     category_path: str = "",
+    use_insights: bool = True,
     authorization: str = Header(None),
 ):
     """
@@ -1016,6 +1065,29 @@ def recall_memories(
                             headers=add_cors_headers(request))
 
     q_lower = q.lower().strip()
+
+    # ── Insight 缓存查询 v1.2.17 ─────────────────────────────
+    # 如果 use_insights=True 且指定了 category_path（且非默认路径），优先返回 insight 摘要
+    if use_insights and category_path and category_path != "general/default":
+        conn = _get_conn()
+        c = conn.cursor()
+        row = c.execute(
+            "SELECT id, capsule_ids, summary, path, hotness_score FROM insights "
+            "WHERE path=? ORDER BY hotness_score DESC LIMIT 1",
+            (category_path,)
+        ).fetchone()
+        if row:
+            import json as _json
+            capsule_ids = _json.loads(row[1]) if row[1] else []
+            return JSONResponse({
+                "type":          "insight",
+                "summary":       row[2],
+                "source_ids":    capsule_ids,
+                "path":          row[3],
+                "hotness_score": row[4],
+                "count":         len(capsule_ids),
+            }, headers=add_cors_headers(request))
+        del conn, c
 
     # ── 读取所有胶囊（含 category_path）────────────────
     conn = _get_conn()
@@ -2162,6 +2234,80 @@ def backfill_paths(request: Request, authorization: str = Header(None), dry_run:
         "by_path": stats["by_path"],
     }, headers=add_cors_headers(request))
 
+# ── Insight 缓存生成（需认证）───────────────────────────────
+@app.post("/admin/generate-insights")
+def generate_insights(request: Request, authorization: str = Header(None), path: str = ""):
+    """
+    手动触发 insight 压缩任务。
+    path='' 时压缩所有路径（至少3个胶囊），否则只压缩指定路径。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    conn = _get_conn()
+    c = conn.cursor()
+
+    stats = {"total": 0, "by_path": {}}
+
+    if path:
+        # 指定路径压缩
+        rows = c.execute(
+            "SELECT id, memo, hotness_score FROM capsules WHERE category_path=? ORDER BY hotness_score DESC LIMIT 20",
+            (path,)
+        ).fetchall()
+        if len(rows) >= 3:
+            ids = [r[0] for r in rows]
+            memos = [r[1] for r in rows if r[1]]
+            avg_hot = sum(r[2] or 0 for r in rows) / len(rows)
+            insight = _generate_insight(path, ids, memos, avg_hot)
+            if insight:
+                c.execute(
+                    "INSERT OR REPLACE INTO insights (id, capsule_ids, summary, path, hotness_score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (insight["id"], insight["capsule_ids"], insight["summary"], insight["path"],
+                     insight["hotness_score"], insight["created_at"], insight["updated_at"])
+                )
+                conn.commit()
+                stats["total"] = 1
+                stats["by_path"][path] = 1
+    else:
+        # 所有路径：取至少有3个胶囊的路径
+        paths = c.execute(
+            "SELECT category_path FROM capsules WHERE category_path!='general/default' GROUP BY category_path HAVING COUNT(*)>=3"
+        ).fetchall()
+        for (p,) in paths:
+            rows = c.execute(
+                "SELECT id, memo, hotness_score FROM capsules WHERE category_path=? ORDER BY hotness_score DESC LIMIT 20",
+                (p,)
+            ).fetchall()
+            if len(rows) < 3:
+                continue
+            # 跳过已有近期 insight 的路径（7天内更新过）
+            recent = c.execute(
+                "SELECT 1 FROM insights WHERE path=? AND updated_at>?",
+                (p, time.time() - 86400 * 7)
+            ).fetchone()
+            if recent:
+                continue
+            ids = [r[0] for r in rows]
+            memos = [r[1] for r in rows if r[1]]
+            avg_hot = sum(r[2] or 0 for r in rows) / len(rows)
+            insight = _generate_insight(p, ids, memos, avg_hot)
+            if insight:
+                c.execute(
+                    "INSERT OR REPLACE INTO insights (id, capsule_ids, summary, path, hotness_score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (insight["id"], insight["capsule_ids"], insight["summary"], insight["path"],
+                     insight["hotness_score"], insight["created_at"], insight["updated_at"])
+                )
+                stats["total"] += 1
+                stats["by_path"][p] = stats["by_path"].get(p, 0) + 1
+
+        if stats["total"] > 0:
+            conn.commit()
+
+    return JSONResponse({
+        "insights_generated": stats["total"],
+        "by_path": stats["by_path"],
+    }, headers=add_cors_headers(request))
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2201,7 +2347,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.13",
+        "version":            "1.2.18",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2226,12 +2372,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.13", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.18", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.15 启动")
+    print("🌙 Amber-Hunter v1.2.18 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
