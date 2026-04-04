@@ -27,7 +27,7 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, count_
     save_tag_feedback, get_tag_feedback,
     _get_conn)
 from core.vector import index_capsule, search_vectors, delete_vector, get_vector_stats
-from core.wal import write_wal_entry, read_wal_entries, get_wal_stats, _detect_signal_type
+from core.wal import write_wal_entry, read_wal_entries, get_wal_stats, wal_gc, _detect_signal_type
 from core.session import get_current_session_key, build_session_summary, get_recent_files, read_session_messages
 from core.models import CapsuleIn, CapsuleUpdate
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
@@ -710,7 +710,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.25")
+app = FastAPI(title="Amber Hunter", version="1.2.26")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1518,6 +1518,10 @@ def recall_memories(
                     if sig_type:
                         entry_data = {"text": text[:500], "signal": sig_type}
                         write_wal_entry(session_key, sig_type, entry_data)
+                        # 懒 GC：处理条目超过 50 条时自动清理 24 小时前的已处理条目
+                        stats = get_wal_stats()
+                        if stats.get("processed_count", 0) > 50:
+                            wal_gc(age_hours=24.0)
         except Exception:
             pass  # WAL 失败不影响 recall 返回
 
@@ -2706,6 +2710,16 @@ def wal_entries(session_id: str = ""):
     return JSONResponse({"entries": read_wal_entries(key)})
 
 
+@app.post("/wal/gc")
+def wal_gc_endpoint(age_hours: float = 24.0):
+    """
+    WAL 垃圾回收：删除已处理的条目（默认 24 小时前的）。
+    POST /wal/gc 或 POST /wal/gc?age_hours=48
+    """
+    result = wal_gc(age_hours=age_hours)
+    return JSONResponse(result)
+
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2745,7 +2759,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.25",
+        "version":            "1.2.26",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2776,7 +2790,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.25 启动")
+    print("🌙 Amber-Hunter v1.2.26 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

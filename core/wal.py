@@ -126,8 +126,9 @@ def mark_wal_processed(entry_ts: float, wal_path: Path = WAL_FILE) -> bool:
 def get_wal_stats() -> dict:
     """返回 WAL 统计信息"""
     if not WAL_FILE.exists():
-        return {"total": 0, "by_type": {}}
+        return {"total": 0, "by_type": {}, "processed_count": 0}
     total = 0
+    processed_count = 0
     by_type: dict = {}
     try:
         with open(WAL_FILE, encoding="utf-8") as f:
@@ -138,8 +139,44 @@ def get_wal_stats() -> dict:
                         entry = json.loads(line)
                         t = entry.get("type", "unknown")
                         by_type[t] = by_type.get(t, 0) + 1
+                        if entry.get("processed"):
+                            processed_count += 1
                     except Exception:
                         pass
     except Exception:
         pass
-    return {"total": total, "by_type": by_type}
+    return {"total": total, "by_type": by_type, "processed_count": processed_count}
+
+
+def wal_gc(age_hours: float = 24.0, wal_path: Path = WAL_FILE) -> dict:
+    """
+    垃圾回收：删除已处理的 WAL 条目（默认 24 小时前的）。
+    返回 {"removed": N, "remaining": M}。
+    """
+    if not wal_path.exists():
+        return {"removed": 0, "remaining": 0}
+    cutoff = time.time() - age_hours * 3600
+    removed = 0
+    remaining = 0
+    tmp = wal_path.with_suffix(".tmp")
+    try:
+        with open(wal_path, encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as out:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if entry.get("processed") and entry.get("ts", 0) < cutoff:
+                        removed += 1
+                    else:
+                        remaining += 1
+                        out.write(line)
+                except Exception:
+                    out.write(line)
+        os.replace(tmp, wal_path)
+    except Exception as e:
+        import sys
+        print(f"[wal] wal_gc failed: {e}", file=sys.stderr)
+        return {"removed": 0, "remaining": 0, "error": str(e)}
+    return {"removed": removed, "remaining": remaining}
+
