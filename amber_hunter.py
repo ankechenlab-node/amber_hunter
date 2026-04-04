@@ -444,8 +444,13 @@ def _get_existing_tag_context(limit: int = 20) -> str:
     return ", ".join(sorted(combined)) if combined else "（无）"
 
 
+_TAG_RULES_CACHE: dict | None = None
+_TAG_RULES_TTL: float = 0
+_TAG_RULES_CACHE_TTL_SEC = 300  # 5 分钟缓存
+
+
 def _normalize_tag(tag: str) -> str:
-    """标签归一化：小写化空格 trim，同义词映射"""
+    """标签归一化：小写化空格 trim，同义词映射 + 用户校正规则"""
     tag = tag.strip().lower()
     SYNONYMS = {
         "py": "python", "js": "javascript",
@@ -455,6 +460,18 @@ def _normalize_tag(tag: str) -> str:
         "postgres": "postgresql", "postgres": "postgresql",
         "pg": "postgresql",
     }
+    # G1: 应用用户校正规则（缓存 5 分钟）
+    global _TAG_RULES_CACHE, _TAG_RULES_TTL
+    now = time.time()
+    if _TAG_RULES_CACHE is None or (now - _TAG_RULES_TTL) > _TAG_RULES_CACHE_TTL_SEC:
+        try:
+            from core.db import get_tag_corrections as _gtc
+            _TAG_RULES_CACHE = _gtc()
+            _TAG_RULES_TTL = now
+        except Exception:
+            _TAG_RULES_CACHE = {}
+    if _TAG_RULES_CACHE and tag in _TAG_RULES_CACHE:
+        return _TAG_RULES_CACHE[tag]
     return SYNONYMS.get(tag, tag)
 
 
@@ -710,7 +727,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.28")
+app = FastAPI(title="Amber Hunter", version="1.2.29")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1967,18 +1984,26 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
     final_category = body.category or item["category"]
     final_tags = body.tags or item["tags"]
 
-    # 检测用户是否修正了标签，记录反馈
-    if body.tags and body.tags != item.get("tags", ""):
-        original_tags = (item.get("tags") or "").split(",")
-        new_tags = body.tags.split(",")
-        for ot in original_tags:
-            ot = ot.strip()
-            if not ot:
-                continue
-            for nt in new_tags:
-                nt = nt.strip()
-                if nt and nt != ot:
-                    save_tag_feedback(ot, nt)
+    # ── G1: 记录校正事件 ────────────────────────────────
+    try:
+        from core.correction import record_tag_correction, record_category_correction
+        # 标签校正
+        if body.tags and body.tags != (item.get("tags") or ""):
+            orig_tags = [(t.strip().lower()) for t in (item.get("tags") or "").split(",") if t.strip()]
+            new_tags_list = [(t.strip().lower()) for t in body.tags.split(",") if t.strip()]
+            for ot in orig_tags:
+                for nt in new_tags_list:
+                    if nt and nt != ot:
+                        record_tag_correction(ot, nt, queue_id=qid)
+        # 分类校正
+        if body.category and body.category != (item.get("category") or ""):
+            record_category_correction(
+                item.get("category") or "",
+                body.category,
+                queue_id=qid,
+            )
+    except Exception:
+        pass  # 校正记录失败不影响入库
 
     queue_update(qid, final_memo, final_category, final_tags)
     cap_id = secrets.token_hex(8)
@@ -2816,6 +2841,40 @@ def extract_status():
     })
 
 
+# ── G1: Self-Correction 端点 ─────────────────────────────────
+
+@app.get("/corrections/stats")
+def corrections_stats(field: str = ""):
+    """
+    返回校正统计数据。
+    ?field=tag 可只看标签校正
+    """
+    from core.correction import analyze_corrections
+    return JSONResponse(analyze_corrections(field=field))
+
+
+@app.get("/corrections/suggestions")
+def corrections_suggestions(threshold: int = 3):
+    """返回自动替换建议（某个 original 被纠正 >= threshold 次）"""
+    from core.db import get_correction_suggestions
+    return JSONResponse({"suggestions": get_correction_suggestions(threshold=threshold)})
+
+
+@app.post("/corrections/apply")
+def apply_correction_rule(body: dict, authorization: str = Header(None)):
+    """采纳一条校正规则：original → corrected 自动替换"""
+    verify_token(authorization)
+    original = (body.get("original") or "").strip().lower()
+    corrected = (body.get("corrected") or "").strip().lower()
+    field = body.get("field", "tag")
+    if not original or not corrected:
+        return JSONResponse({"error": "original and corrected required"}, status_code=400)
+    if field == "tag":
+        from core.correction import apply_tag_rule
+        apply_tag_rule(original, corrected)
+    return JSONResponse({"status": "ok", "rule": f"{original} → {corrected}"})
+
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2855,7 +2914,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.28",
+        "version":            "1.2.29",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2886,7 +2945,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.28 启动")
+    print("🌙 Amber-Hunter v1.2.29 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

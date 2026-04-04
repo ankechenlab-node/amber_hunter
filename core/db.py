@@ -174,6 +174,27 @@ def init_db():
     except Exception:
         pass
 
+    # v1.2.29 G1: correction_log — 自我校正闭环事件日志
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS correction_log (
+            id              TEXT PRIMARY KEY,
+            field          TEXT NOT NULL,      -- 'tag' | 'category' | 'reject'
+            original_value  TEXT NOT NULL,
+            corrected_value TEXT NOT NULL,
+            source          TEXT DEFAULT 'queue_edit',  -- 'queue_edit' | 'recall_feedback'
+            session_id     TEXT,
+            queue_id       TEXT,
+            confidence     REAL DEFAULT 1.0,
+            created_at     REAL DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    try:
+        c.execute("CREATE INDEX IF NOT EXISTS idx_correction_field ON correction_log(field)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_correction_original ON correction_log(original_value)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_correction_created ON correction_log(created_at DESC)")
+    except Exception:
+        pass
+
     # v1.2.10+: 常用查询索引
     for index_sql in [
         "CREATE INDEX IF NOT EXISTS idx_capsules_synced ON capsules(synced)",
@@ -537,4 +558,128 @@ def list_profile() -> dict:
     ).fetchall()
     conn.close()
     return {r[0]: {"content": r[1], "source": r[2], "hotness": r[3], "updated_at": r[4]} for r in rows}
+
+
+# ── G1: Correction Self-Correction Loop ──────────────────────────────────────
+
+def record_correction(
+    field: str,
+    original_value: str,
+    corrected_value: str,
+    source: str = "queue_edit",
+    session_id: str | None = None,
+    queue_id: str | None = None,
+    confidence: float = 1.0,
+) -> str:
+    """记录一次校正事件，返回 log id"""
+    import secrets
+    log_id = secrets.token_hex(8)
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO correction_log
+              (id, field, original_value, corrected_value, source, session_id, queue_id, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (log_id, field, original_value, corrected_value, source, session_id, queue_id, confidence, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+    return log_id
+
+
+def get_correction_stats(field: str = "") -> dict:
+    """
+    统计校正数据。
+    返回 {corrections: [{original, corrected, count, last_corrected}], total: N}
+    如果指定 field 则只统计该类型。
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    sql = """
+        SELECT original_value, corrected_value, COUNT(*) as cnt, MAX(created_at) as last_at
+        FROM correction_log
+        WHERE field = ?
+        GROUP BY original_value, corrected_value
+        ORDER BY cnt DESC, last_at DESC
+    """
+    rows = c.execute(sql, (field,)).fetchall()
+    conn.close()
+    corrections = [
+        {"original": r[0], "corrected": r[1], "count": r[2], "last_corrected": r[3]}
+        for r in rows
+    ]
+    total = sum(r[2] for r in rows)
+    return {"corrections": corrections, "total": total, "field": field}
+
+
+def get_correction_suggestions(threshold: int = 3) -> list[dict]:
+    """
+    生成校正建议：original_value 被纠正 >= threshold 次 → 建议自动替换。
+    返回 [{original, suggested, count, confidence}, ...]
+    """
+    suggestions = []
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    # 找出被多次纠正为同一值的 original
+    rows = c.execute("""
+        SELECT original_value, corrected_value, COUNT(*) as cnt
+        FROM correction_log
+        WHERE field = 'tag'
+        GROUP BY original_value, corrected_value
+        HAVING cnt >= ?
+        ORDER BY cnt DESC
+    """, (threshold,)).fetchall()
+    conn.close()
+    for r in rows:
+        suggestions.append({
+            "original": r[0],
+            "suggested": r[1],
+            "count": r[2],
+            "confidence": min(1.0, r[2] / (r[2] + 5)),  # 次数越多置信度越高
+            "field": "tag",
+        })
+    return suggestions
+
+
+def apply_correction_suggestion(original: str, corrected: str, field: str = "tag") -> bool:
+    """
+    采纳建议：把 original → corrected 的映射记录到 config。
+    下次 auto-tag 时遇到 original 会自动替换为 corrected。
+    """
+    key = f"tag_correction:{original.lower()}"
+    import json
+    existing = get_config(key)
+    mapping = {}
+    if existing:
+        try:
+            mapping = json.loads(existing)
+        except Exception:
+            mapping = {}
+    mapping[corrected.lower()] = mapping.get(corrected.lower(), 0) + 1
+    set_config(key, json.dumps(mapping))
+    return True
+
+
+def get_tag_corrections() -> dict[str, str]:
+    """
+    返回所有已采纳的 tag 校正映射：{original_tag: most_likely_corrected_tag}
+    用于 _auto_tag_local 时替换。
+    """
+    import json
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    rows = c.execute("SELECT key, value FROM config WHERE key LIKE 'tag_correction:%'").fetchall()
+    conn.close()
+    result = {}
+    for key, value in rows:
+        original = key.replace("tag_correction:", "")
+        try:
+            mapping = json.loads(value)
+            if mapping:
+                suggested = max(mapping, key=mapping.get)
+                result[original] = suggested
+        except Exception:
+            pass
+    return result
 

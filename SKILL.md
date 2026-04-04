@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Gives any AI client long-term memory — captures, encrypts, and recalls personal context across sessions
-> Version: 1.2.28 | 2026-04-04
+> Version: 1.2.29 | 2026-04-04
 
 ---
 
@@ -309,6 +309,7 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ## Version History
 
+- **v1.2.29** (2026-04-04): G1 Self-Correction Loop — `correction_log` SQLite 表记录每次校正事件；`_normalize_tag` 应用用户校正规则（5分钟缓存）；`record_tag_correction` / `record_category_correction` 在 queue edit 时调用；`GET /corrections/stats` 分析校正模式；`POST /corrections/apply` 采纳替换规则。
 - **v1.2.28** (2026-04-04): P2-1 Mem0 Auto-extraction — `core/extractor.py` 从对话自动抽取 facts/preferences/decisions；`POST /extract/auto` 高置信直接入库/中置信进队列；`GET /extract/status` 查看抽取统计；结合 WAL 信号 + 偏好提取 + LLM 结构化抽取三重机制。
 - **v1.2.27** (2026-04-04): P1-1 Structured User Profile — `user_profile` SQLite 表；`core/profile.py` LLM extraction；`GET /profile` 返回四段画像；`PUT /profile/{section}` 手动更新；`POST /profile/build` 从 session 构建；recall 响应注入 `profile` 字段。
 - **v1.2.26** (2026-04-04): P0-2续 WAL GC — `wal_gc(age_hours=24)` 删除已处理条目；`get_wal_stats()` 新增 `processed_count`；懒 GC（>50 条已处理时自动清理）；`POST /wal/gc` 端点支持手动 GC。
