@@ -710,7 +710,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.27")
+app = FastAPI(title="Amber Hunter", version="1.2.28")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -2790,6 +2790,32 @@ def build_profile_endpoint(authorization: str = Header(None)):
     return JSONResponse({"status": "ok", "profile": result})
 
 
+# ── P2-1: Mem0 Auto-Extraction 端点 ─────────────────────────────────
+
+@app.post("/extract/auto")
+def extract_auto(request: Request, session_key: str = ""):
+    """
+    自动从当前 session 抽取 facts/preferences/decisions（供 proactive hook 调用）。
+    高置信(>=0.9) 直接入库，中置信(>=0.5) 进审核队列。
+    """
+    from core.extractor import auto_extract
+    sk = session_key if session_key else None
+    result = auto_extract(sk)
+    return JSONResponse(result)
+
+
+@app.get("/extract/status")
+def extract_status():
+    """返回上次抽取统计"""
+    from core.db import get_config
+    last = get_config("auto_extract_last")
+    count = get_config("auto_extract_count")
+    return JSONResponse({
+        "last_run": float(last) if last else None,
+        "total_extracted": int(count) if count else 0,
+    })
+
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2829,7 +2855,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.27",
+        "version":            "1.2.28",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2860,7 +2886,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.27 启动")
+    print("🌙 Amber-Hunter v1.2.28 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
