@@ -710,7 +710,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.26")
+app = FastAPI(title="Amber Hunter", version="1.2.27")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1525,8 +1525,23 @@ def recall_memories(
         except Exception:
             pass  # WAL 失败不影响 recall 返回
 
+    # ── P1-1: 注入 user_profile 到 recall 响应 ─────────────
+    _profile: dict = {}
+    try:
+        from core.profile import get_full_profile, build_or_update_profile
+        _profile = get_full_profile()
+        # 如果 PREFERENCES 为空，尝试从当前 session 构建
+        if not _profile.get("PREFERENCES", {}).get("content"):
+            _sk = get_current_session_key()
+            if _sk:
+                build_or_update_profile(_sk)
+                _profile = get_full_profile()
+    except Exception:
+        _profile = {}
+
     return JSONResponse({
         "memories":          memories[:limit],
+        "profile":           _profile,
         "query":             q,
         "mode":              search_mode,
         "count":             len(memories),
@@ -2720,6 +2735,61 @@ def wal_gc_endpoint(age_hours: float = 24.0):
     return JSONResponse(result)
 
 
+# ── P1-1: User Profile 端点 ─────────────────────────────────
+
+@app.get("/profile")
+def get_full_profile():
+    """返回完整四段 profile（无需认证）"""
+    from core.profile import get_full_profile
+    return JSONResponse(get_full_profile())
+
+
+@app.get("/profile/{section}")
+def get_profile_section(section: str):
+    """读取单个 profile section"""
+    from core.db import get_profile
+    valid = {"WHO_I_AM", "STACK", "GOALS", "PREFERENCES"}
+    section_upper = section.upper()
+    if section_upper not in valid:
+        raise HTTPException(400, f"Invalid section. Must be one of: {valid}")
+    p = get_profile(section_upper)
+    if not p:
+        raise HTTPException(404, f"Profile section '{section}' not found")
+    return JSONResponse(p)
+
+
+@app.put("/profile/{section}")
+def update_profile_section(section: str, body: dict, authorization: str = Header(None)):
+    """手动更新 profile section（需认证）"""
+    verify_token(authorization)
+    from core.db import update_profile, insert_profile, get_profile
+    valid = {"WHO_I_AM", "STACK", "GOALS", "PREFERENCES"}
+    section_upper = section.upper()
+    if section_upper not in valid:
+        raise HTTPException(400, f"Invalid section. Must be one of: {valid}")
+    content = body.get("content", "")
+    existing = get_profile(section_upper)
+    if existing:
+        update_profile(section_upper, content, source="manual")
+    else:
+        insert_profile(section_upper, content, source="manual")
+    return JSONResponse({"status": "ok", "section": section_upper})
+
+
+@app.post("/profile/build")
+def build_profile_endpoint(authorization: str = Header(None)):
+    """从当前 session 的 WAL 条目构建 profile（需认证）"""
+    verify_token(authorization)
+    from core.profile import build_or_update_profile
+    sk = get_current_session_key()
+    if not sk:
+        return JSONResponse({"error": "No active session"}, status_code=400)
+    result = build_or_update_profile(sk)
+    if not result:
+        return JSONResponse({"error": "No signals found in session"}, status_code=404)
+    return JSONResponse({"status": "ok", "profile": result})
+
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2759,7 +2829,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.26",
+        "version":            "1.2.27",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2790,7 +2860,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.26 启动")
+    print("🌙 Amber-Hunter v1.2.27 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

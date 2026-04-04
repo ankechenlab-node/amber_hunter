@@ -156,6 +156,24 @@ def init_db():
     except Exception:
         pass
 
+    # v1.2.27: user_profile 表（P1-1 Structured User Profile）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_profile (
+            id           TEXT PRIMARY KEY,
+            section      TEXT NOT NULL UNIQUE,
+            content      TEXT NOT NULL,
+            source       TEXT DEFAULT 'manual',
+            session_id   TEXT,
+            hotness      REAL DEFAULT 0.0,
+            created_at   REAL DEFAULT (strftime('%s', 'now')),
+            updated_at   REAL DEFAULT (strftime('%s', 'now'))
+        )
+    """)
+    try:
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_section ON user_profile(section)")
+    except Exception:
+        pass
+
     # v1.2.10+: 常用查询索引
     for index_sql in [
         "CREATE INDEX IF NOT EXISTS idx_capsules_synced ON capsules(synced)",
@@ -442,3 +460,81 @@ def update_capsule_hit(capsule_id: str, relevance_score: float) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+# ── User Profile CRUD (P1-1) ────────────────────────────────────────────────
+
+def insert_profile(
+    section: str,
+    content: str,
+    source: str = "manual",
+    session_id: str | None = None,
+) -> bool:
+    """插入或替换 profile section"""
+    import secrets
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        pid = secrets.token_hex(8)
+        now = time.time()
+        c.execute("""
+            INSERT OR REPLACE INTO user_profile
+              (id, section, content, source, session_id, hotness, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0.0, ?, ?)
+        """, (pid, section, content, source, session_id, now, now))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def update_profile(
+    section: str,
+    content: str,
+    source: str = "manual",
+    session_id: str | None = None,
+) -> bool:
+    """更新已有 profile section"""
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        now = time.time()
+        c.execute("""
+            UPDATE user_profile
+            SET content = ?, source = ?, session_id = ?, updated_at = ?
+            WHERE section = ?
+        """, (content, source, session_id, now, section))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_profile(section: str) -> dict | None:
+    """读取单个 profile section"""
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    try:
+        row = c.execute(
+            "SELECT id, section, content, source, session_id, hotness, created_at, updated_at "
+            "FROM user_profile WHERE section = ?",
+            (section,)
+        ).fetchone()
+        if not row:
+            return None
+        keys = ["id", "section", "content", "source", "session_id", "hotness", "created_at", "updated_at"]
+        return dict(zip(keys, row))
+    finally:
+        conn.close()
+
+
+def list_profile() -> dict:
+    """读取所有 profile sections，返回 {section: content}"""
+    conn = sqlite3.connect(str(DB_PATH))
+    c = conn.cursor()
+    rows = c.execute(
+        "SELECT section, content, source, hotness, updated_at FROM user_profile ORDER BY section"
+    ).fetchall()
+    conn.close()
+    return {r[0]: {"content": r[1], "source": r[2], "hotness": r[3], "updated_at": r[4]} for r in rows}
+
