@@ -710,7 +710,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.24")
+app = FastAPI(title="Amber Hunter", version="1.2.25")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1274,24 +1274,35 @@ def recall_memories(
         capsules_raw = []
 
     # ── 关键词评分（解密后）────────────────────────
-    def _kw_score(cap) -> float:
+    def _kw_score(cap) -> tuple[float, list[str]]:
+        """返回 (score, matched_terms)，matched_terms 用于可解释召回"""
         score = 0
+        matched: list[str] = []
         qw = q_lower.split()
         memo = (cap.get("memo") or "").lower()
         tags = (cap.get("tags") or "").lower()
         text = (cap.get("_plain_content") or "").lower()
         for w in qw:
-            score += memo.count(w) * 3
-            score += tags.count(w) * 2
-            score += text.count(w)
-        if q_lower in memo: score += 10
-        if q_lower in text: score += 5
-        return float(score)
+            if w in memo:
+                score += 3
+                matched.append(f"memo:{w}")
+            if w in tags:
+                score += 2
+                matched.append(f"tags:{w}")
+            if w in text:
+                score += 1
+                matched.append(f"content:{w}")
+        if q_lower in memo:
+            score += 10
+            matched.append(f"exact:{q_lower[:30]}")
+        if q_lower in text:
+            score += 5
+        return float(score), matched
 
     kw_scores = [(_kw_score(c), c) for c in parsed]
-    max_kw = max((s for s, _ in kw_scores), default=1.0) or 1.0
+    max_kw = max((score for (score, _), _ in kw_scores), default=1.0) or 1.0
     # 归一化关键词分到 0-1
-    kw_norm = [(s / max_kw, c) for s, c in kw_scores]
+    kw_norm = [(score / max_kw, c, terms) for (score, terms), c in kw_scores]
 
     # ── P0-1: 语义评分（LanceDB 优先，on-the-fly 回退）────
     search_mode = mode
@@ -1337,10 +1348,22 @@ def recall_memories(
                     )
                 search_mode = "keyword"
 
+    # ── P0-3: WAL 信号预加载（correction 信号的 capsule_id 关联）────
+    wal_signals: dict[str, dict] = {}  # capsule_id -> wal_entry
+    try:
+        _session_key = get_current_session_key()
+        if _session_key:
+            for e in read_wal_entries(_session_key, processed=False):
+                cid = e.get("data", {}).get("capsule_id")
+                if cid:
+                    wal_signals[cid] = e
+    except Exception:
+        pass
+
     # ── 混合评分 + 排序（含 recency/hotness）────────────────
     now_ts = time.time()
     combined = []
-    for kw_n, cap in kw_norm:
+    for kw_n, cap, terms in kw_norm:
         lance = sem_scores.get(cap["id"], 0.0)  # P0-1: LanceDB score (或 on-the-fly 回退)
         # 时间衰减：90天完全衰减到 0.37
         days_old = (now_ts - cap.get("created_at", now_ts)) / 86400
@@ -1353,13 +1376,13 @@ def recall_memories(
             final = 0.80 * lance + 0.12 * recency + 0.08 * hotness
         else:
             final = 0.80 * kw_n + 0.15 * recency + 0.05 * hotness
-        combined.append((final, kw_n, lance, recency, hotness, cap))
+        combined.append((final, kw_n, lance, recency, hotness, cap, terms))
 
     # 过滤掉完全无信号的结果
     if search_mode == "keyword":
-        combined = [(s, kw_n, lance, r, h, c) for s, kw_n, lance, r, h, c in combined if s > 0]
+        combined = [(s, kw_n, lance, r, h, c, terms) for s, kw_n, lance, r, h, c, terms in combined if s > 0]
     else:
-        combined = [(s, kw_n, lance, r, h, c) for s, kw_n, lance, r, h, c in combined if s > 0.05]
+        combined = [(s, kw_n, lance, r, h, c, terms) for s, kw_n, lance, r, h, c, terms in combined if s > 0.05]
 
     combined.sort(key=lambda x: x[0], reverse=True)
     top = combined[:limit]
@@ -1388,9 +1411,9 @@ def recall_memories(
         scores.sort(key=lambda x: x[0], reverse=True)
         return [cid for _, cid in scores[:limit]]
 
-    top_ids = {c["id"] for _, _, _, _, _, c in top}
+    top_ids = {c["id"] for _, _, _, _, _, c, _ in top}
     related_map: dict[str, list] = {}
-    for _, _, _, _, _, cap in top:
+    for _, _, _, _, _, cap, _ in top:
         memo = cap.get("memo", "") or ""
         tags = cap.get("tags", "") or ""
         plain = cap.get("_plain_content", "") or ""
@@ -1402,7 +1425,7 @@ def recall_memories(
             related_map[cap["id"]] = []
 
     # ── 组装返回 ─────────────────────────────────
-    def _build_memory(score: float, kw_n: float, lance: float, recency: float, hotness: float, cap: dict, related_ids: list) -> dict:
+    def _build_memory(score: float, kw_n: float, lance: float, recency: float, hotness: float, cap: dict, related_ids: list, matched_terms: list, wal_signal: dict | None) -> dict:
         memo = cap.get("memo", "")
         plain = cap.get("_plain_content", "")
         tags = cap.get("tags", "")
@@ -1414,19 +1437,33 @@ def recall_memories(
             f"记忆：{memo}\n"
             f"内容：{plain[:400]}{'...' if len(plain) > 400 else ''}"
         )
-        # 生成中文 reason
-        parts = []
-        if kw_n > 0.5:
-            parts.append("关键词命中")
-        if lance > 0.5:
-            parts.append("语义相似")
+        # ── P0-3: 生成详细 reason（可解释召回）──────────────
+        parts: list[str] = []
+        if matched_terms:
+            # 去重 + 限制显示前 5 个
+            unique_terms = list(dict.fromkeys(matched_terms[:5]))
+            terms_str = ", ".join(unique_terms)
+            parts.append(f"关键词：{terms_str}")
+        if lance > 0.6:
+            parts.append(f"语义高度相似（{int(lance*100)}%）")
+        elif lance > 0.3:
+            parts.append(f"语义相关（{int(lance*100)}%）")
         if recency > 0.8:
             parts.append("近期记忆")
         elif recency < 0.3:
             parts.append("久远记忆")
         if hotness > 0.6:
             parts.append("高热记忆")
-        reason = "、".join(parts) if parts else "综合相关"
+        if wal_signal:
+            t = wal_signal.get("type", "")
+            if t == "correction":
+                original = wal_signal.get("data", {}).get("original", "")
+                parts.append(f"⚠️ 已修正：'{original[:30]}'")
+            elif t == "preference":
+                parts.append("🟢 用户偏好信号")
+            elif t == "decision":
+                parts.append("🔵 用户决定信号")
+        reason = "；".join(parts) if parts else "综合相关"
         return {
             "id":              cap["id"],
             "memo":            memo,
@@ -1439,17 +1476,22 @@ def recall_memories(
             "relevance_score": round(score, 3),
             "breakdown": {
                 "keyword_score": round(kw_n, 3),
-                "semantic_score": round(lance, 3),  # P0-1: lance_score (or on-the-fly fallback)
+                "semantic_score": round(lance, 3),
                 "recency_score": round(recency, 3),
                 "hotness_score": round(hotness, 3),
+                "matched_terms": matched_terms[:5],  # P0-3: 去重限制
+                "wal_signal": wal_signal.get("type") if wal_signal else None,  # P0-3
             },
             "related_ids":     related_ids,
-            "reason":          reason,
+            "reason":          reason,  # P0-3: 详细自然语言
             "injected_prompt": injected,
             "hit_url":         f"/recall/{cap['id']}/hit",
         }
 
-    memories = [_build_memory(s, kw_n, lance, r, h, c, related_map.get(c["id"], [])) for s, kw_n, lance, r, h, c in top]
+    memories = [
+        _build_memory(s, kw_n, lance, r, h, c, related_map.get(c["id"], []), terms, wal_signals.get(c["id"]))
+        for s, kw_n, lance, r, h, c, terms in top
+    ]
 
     # 清理解密明文
     del parsed
@@ -2703,7 +2745,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.24",
+        "version":            "1.2.25",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2734,7 +2776,7 @@ def root(request: Request):
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.24 启动")
+    print("🌙 Amber-Hunter v1.2.25 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

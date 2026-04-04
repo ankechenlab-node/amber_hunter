@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Gives any AI client long-term memory — captures, encrypts, and recalls personal context across sessions
-> Version: 1.2.24 | 2026-04-04
+> Version: 1.2.25 | 2026-04-04
 
 ---
 
@@ -309,6 +309,7 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ## Version History
 
+- **v1.2.25** (2026-04-04): P0-3 可解释召回 — `_kw_score` 返回 `(score, matched_terms)`；`breakdown` 新增 `matched_terms` + `wal_signal`；`reason` 改为详细自然语言说明（含具体匹配词、语义相似度%、WAL信号类型）。
 - **v1.2.24** (2026-04-04): P0-2 WAL 热存储 — `core/wal.py` 新增 Session State WAL 模块；`recall_memories` 返回前检测偏好/决定/修正信号并写入 `~/.amber-hunter/session_wal.jsonl`；新增 `/wal/status` + `/wal/entries` 端点。
 - **v1.2.23** (2026-04-04): P0-1 LanceDB 向量搜索 — `core/vector.py` 新增 LanceDB 封装；胶囊入库时同步写向量；recall 优先 LanceDB top_k 检索（0.50权重），on-the-fly 回退；升级 torch 2.8.0。
 - **v1.2.22** (2026-04-04): Fix line 1570 bug (`row[2]`→`stored_challenge`) in `/api/did/auth/verify`; add `POST /did/auth/challenge` + `POST /did/auth/sign-challenge` in amber_hunter; fix `did_register_device` to use `get_api_token()`; fix `HOME` reference before definition.
