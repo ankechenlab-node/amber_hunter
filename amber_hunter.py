@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Amber-Hunter v1.2.22
+Amber-Hunter v1.2.31
 Huper琥珀本地感知引擎
 
 兼容 huper v1.0.0（DID 身份层）
+P1-2: Multi-Embedding | P1-3: Recall Cooldown | P2-2: Pattern Detection | P2-3: Cross-device Sync
 """
 from __future__ import annotations
 
@@ -250,48 +251,35 @@ def _get_topics_from_config() -> list[dict]:
 
 def _get_embed_model(blocking: bool = True):
     """
-    懒加载向量模型（all-MiniLM-L6-v2），线程安全。
+    P1-2: 获取 EmbedProvider 实例，委托给 core.embedding 模块。
+    保留原接口兼容 classify_topics 等内部调用。
 
     Args:
         blocking: True=同步等待加载完成；False=若正在加载则立即返回 None（不阻塞）
     Returns:
-        模型实例或 None
+        EmbedProvider 实例或 None
     """
-    global _EMBED_MODEL, _SEMANTIC_AVAILABLE, _MODEL_LOADING, _MODEL_LOAD_ERROR
-
-    if _EMBED_MODEL is not None:
-        return _EMBED_MODEL
-
-    with _MODEL_LOAD_LOCK:
-        # 双重检查（获取锁后）
-        if _EMBED_MODEL is not None:
-            return _EMBED_MODEL
-
-        if _MODEL_LOADING:
-            if not blocking:
-                return None
-            # 等待中：释放锁后由外层再次尝试...
-
-        _MODEL_LOADING = True
-        _MODEL_LOAD_ERROR = None
-        try:
-            from sentence_transformers import SentenceTransformer
-            _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-            _SEMANTIC_AVAILABLE = True
-            return _EMBED_MODEL
-        except Exception as e:
-            _MODEL_LOAD_ERROR = str(e)
-            _SEMANTIC_AVAILABLE = False
-            _EMBED_MODEL = None
-            return None
-        finally:
-            _MODEL_LOADING = False
+    global _SEMANTIC_AVAILABLE
+    from core.embedding import get_cached_embed, reset_embed_provider
+    try:
+        provider = get_cached_embed()
+        # MiniLMProvider 在首次 encode 时才真正加载模型
+        _SEMANTIC_AVAILABLE = True
+        return provider
+    except Exception as e:
+        _MODEL_LOAD_ERROR = str(e)
+        _SEMANTIC_AVAILABLE = False
+        return None
 
 
 def _preload_embed_model():
     """后台线程预加载语义模型，不阻塞主线程。"""
     def _background_load():
-        _get_embed_model(blocking=True)
+        try:
+            from core.embedding import get_cached_embed
+            get_cached_embed()
+        except Exception:
+            pass
     t = threading.Thread(target=_background_load, daemon=True, name="amber-embed-preload")
     t.start()
 
@@ -727,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.30")
+app = FastAPI(title="Amber Hunter", version="1.2.31")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1380,6 +1368,23 @@ def recall_memories(
     # ── 混合评分 + 排序（含 recency/hotness）────────────────
     now_ts = time.time()
     combined = []
+
+    # ── P1-3: Recall Memory Cooldown — 压制最近 30 分钟内召回过的胶囊 ──
+    COOLDOWN_SECONDS = max(60, int(get_config("recall_cooldown_seconds") or "1800"))  # 默认 30 分钟
+    recent_hit_ids: set = set()
+    try:
+        cooldown_conn = _get_conn()
+        cooldown_c = cooldown_conn.cursor()
+        cooldown_cutoff = now_ts - COOLDOWN_SECONDS
+        cooldown_rows = cooldown_c.execute(
+            "SELECT DISTINCT capsule_id FROM memory_hits WHERE hit_at > ?",
+            (cooldown_cutoff,)
+        ).fetchall()
+        recent_hit_ids = {r[0] for r in cooldown_rows}
+        del cooldown_c, cooldown_conn
+    except Exception:
+        pass  # cooldown 查询失败不影响正常评分
+
     for kw_n, cap, terms in kw_norm:
         lance = sem_scores.get(cap["id"], 0.0)  # P0-1: LanceDB score (或 on-the-fly 回退)
         # 时间衰减：90天完全衰减到 0.37
@@ -1393,6 +1398,9 @@ def recall_memories(
             final = 0.80 * lance + 0.12 * recency + 0.08 * hotness
         else:
             final = 0.80 * kw_n + 0.15 * recency + 0.05 * hotness
+        # P1-3: 完全压制冷却期内的胶囊
+        if cap["id"] in recent_hit_ids:
+            final = 0.0
         combined.append((final, kw_n, lance, recency, hotness, cap, terms))
 
     # 过滤掉完全无信号的结果
@@ -1533,8 +1541,16 @@ def recall_memories(
                         continue
                     sig_type = _detect_signal_type(text)
                     if sig_type:
-                        entry_data = {"text": text[:500], "signal": sig_type}
+                        entry_data = {"text": text[:500], "signal": sig_type, "capsule_id": ""}
                         write_wal_entry(session_key, sig_type, entry_data)
+                        # P2-2: WAL correction 信号写入 correction_log
+                        if sig_type == "correction":
+                            try:
+                                from core.correction import record_rejection
+                                record_rejection(memo=text[:200], reason="wal_correction",
+                                               session_id=session_key)
+                            except Exception:
+                                pass
                         # 懒 GC：处理条目超过 50 条时自动清理 24 小时前的已处理条目
                         stats = get_wal_stats()
                         if stats.get("processed_count", 0) > 50:
@@ -2029,13 +2045,18 @@ def review_queue(request: Request = None, authorization: str = Header(None)):
     """
     终端友好的待审核记忆列表。
     curl "http://localhost:18998/-review?token=$TOKEN"
+    ?format=text （默认）返回纯文本 lines 数组，适合 curl 管道
+    ?format=json 返回完整 JSON 格式
     """
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
     h = add_cors_headers(request) if request else {}
 
+    fmt = request.query_params.get("format", "text") if request else "text"
     pending = queue_list_pending()
     if not pending:
+        if fmt == "json":
+            return JSONResponse({"lines": [], "count": 0}, headers=h)
         return JSONResponse({"lines": ["📋 待审阅记忆 (0条)"], "count": 0}, headers=h)
 
     lines = [f"📋 待审阅记忆 ({len(pending)}条)\n"]
@@ -2056,6 +2077,10 @@ def review_queue(request: Request = None, authorization: str = Header(None)):
     lines.append("---")
     lines.append("操作: curl -X POST \"/-review/{id}?action=approve&token=$TOKEN\"")
     lines.append("     curl -X POST \"/-review/{id}?action=reject&token=$TOKEN\"")
+
+    if fmt == "json":
+        return JSONResponse({"lines": lines, "count": len(pending), "items": pending}, headers=h)
+    return JSONResponse({"lines": lines, "count": len(pending)}, headers=h)
 
     return JSONResponse({"lines": lines, "count": len(pending), "items": pending}, headers=h)
 
@@ -2326,6 +2351,273 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
         "all_synced": total_synced == len(unsynced),
     }, headers=h)
 
+
+# ── P2-3: Cross-device Sync — Pull from Cloud ─────────────────────────────
+def _pull_from_cloud(api_token: str, huper_url: str, master_pw: str) -> dict:
+    """
+    从云端拉取本设备不存在的胶囊。
+    返回 {"pulled": int, "conflicts": int, "errors": list}
+    """
+    import httpx
+    from urllib.parse import urlparse
+
+    pulled = 0
+    conflicts = 0
+    errors = []
+
+    # 网络可达性检查
+    parsed = urlparse(huper_url)
+    host = parsed.netloc or parsed.path.split("/")[0]
+    try:
+        import socket
+        sock = socket.create_connection((host, 443), timeout=3.0)
+        sock.close()
+    except OSError:
+        return {"pulled": 0, "conflicts": 0, "errors": [{"error": f"network unreachable: {host}"}]}
+
+    try:
+        with httpx.Client(timeout=15.0, trust_env=False) as client:
+            # 获取云端胶囊列表
+            resp = client.get(
+                f"{huper_url}/capsules",
+                headers={"Authorization": f"Bearer {api_token}"},
+                params={"limit": 300},
+            )
+            if resp.status_code == 401:
+                return {"pulled": 0, "conflicts": 0, "errors": [{"error": "unauthorized, check api_token"}]}
+            if resp.status_code not in (200, 201):
+                return {"pulled": 0, "conflicts": 0, "errors": [{"error": f"cloud returned {resp.status_code}"}]}
+
+            cloud_capsules = resp.json() if resp.text else []
+            if isinstance(cloud_capsules, dict):
+                cloud_capsules = cloud_capsules.get("capsules", [])
+
+        # 获取本地所有胶囊的 ID 和 updated_at
+        conn = _get_conn()
+        c = conn.cursor()
+        local_rows = c.execute("SELECT id, updated_at FROM capsules").fetchall()
+        local_map = {str(r[0]): float(r[1] or r[0]) for r in local_rows}  # id -> updated_at
+
+        for cloud_cap in cloud_capsules:
+            cloud_id = cloud_cap.get("id") or cloud_cap.get("capsule_id")
+            if not cloud_id:
+                continue
+
+            cloud_updated = float(cloud_cap.get("updated_at", 0) or cloud_cap.get("created_at", 0))
+
+            if cloud_id in local_map:
+                # 冲突检测：LWW
+                local_updated = local_map[cloud_id]
+                if cloud_updated > local_updated:
+                    # 云端更新，保留云端（覆盖本地）
+                    try:
+                        _import_cloud_capsule(cloud_cap, master_pw)
+                        pulled += 1
+                    except Exception as e:
+                        errors.append({"id": cloud_id, "error": str(e)})
+                    conflicts += 1
+                # else: 本地更新，保留本地，不操作
+            else:
+                # 云端有，本地没有 → 导入
+                try:
+                    _import_cloud_capsule(cloud_cap, master_pw)
+                    pulled += 1
+                except Exception as e:
+                    errors.append({"id": cloud_id, "error": str(e)})
+
+    except Exception as e:
+        errors.append({"error": f"pull failed: {e}"})
+
+    return {"pulled": pulled, "conflicts": conflicts, "errors": errors}
+
+
+def _import_cloud_capsule(cloud_cap: dict, master_pw: str) -> None:
+    """解密并导入云端胶囊到本地数据库。"""
+    from core.crypto import derive_key, decrypt_content
+    import base64
+
+    cap_id = cloud_cap.get("id") or cloud_cap.get("capsule_id")
+    memo_enc = cloud_cap.get("memo_enc", "")
+    memo_nonce = cloud_cap.get("memo_nonce", "")
+    content_enc = cloud_cap.get("content_enc", "")
+    content_nonce = cloud_cap.get("content_nonce", "")
+    tags_enc = cloud_cap.get("tags_enc", "")
+    tags_nonce = cloud_cap.get("tags_nonce", "")
+    salt_b64 = cloud_cap.get("salt", "")
+    created_at = float(cloud_cap.get("created_at", time.time()))
+    updated_at = float(cloud_cap.get("updated_at", created_at))
+
+    if not salt_b64:
+        return  # 无法解密
+
+    # 解密
+    try:
+        salt = base64.b64decode(salt_b64)
+        key = derive_key(master_pw, salt)
+
+        def _decrypt_text(enc_b64, nonce_b64):
+            if not enc_b64 or not nonce_b64:
+                return ""
+            try:
+                ct = base64.b64decode(enc_b64)
+                nonce = base64.b64decode(nonce_b64)
+                pt = decrypt_content(ct, key, nonce)
+                return pt.decode("utf-8") if pt else ""
+            except Exception:
+                return ""
+
+        memo = _decrypt_text(memo_enc, memo_nonce)
+        content = _decrypt_text(content_enc, content_nonce)
+        tags = _decrypt_text(tags_enc, tags_nonce)
+    except Exception:
+        memo = cloud_cap.get("memo", "") or ""
+        content = ""
+        tags = cloud_cap.get("tags", "") or ""
+
+    category = cloud_cap.get("category", "") or ""
+    source_type = cloud_cap.get("source_type", "sync") or "sync"
+    session_id = cloud_cap.get("session_id")
+
+    # 写入本地 DB
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO capsules
+          (id, memo, content, tags, session_id, window_title, url, created_at, updated_at,
+           salt, nonce, encrypted_len, content_hash, synced, source_type, category, category_path, key_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'general/default', 'pbkdf2')
+    """, (
+        cap_id, memo, content, tags, session_id,
+        cloud_cap.get("window_title"), cloud_cap.get("url"),
+        created_at, updated_at,
+        salt_b64, cloud_cap.get("nonce", ""),
+        len(content_enc), cloud_cap.get("content_hash", ""),
+        source_type, category,
+    ))
+    conn.commit()
+
+
+@app.get("/sync/pull")
+def sync_pull(request: Request, authorization: str = Header(None)):
+    """
+    从云端拉取新胶囊到本地（双向同步之 Pull 方向）。
+    使用 LWW（Last Write Wins）策略解决冲突。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    api_token = get_api_token()
+    huper_url = get_huper_url() or "https://huper.org/api"
+    master_pw = get_master_password()
+    if not master_pw:
+        return JSONResponse(
+            {"error": "master_password not set"},
+            status_code=400, headers=add_cors_headers(request)
+        )
+
+    result = _pull_from_cloud(api_token, huper_url, master_pw)
+    logging.info(f"[amber-hunter] /sync/pull: {result}")
+    return JSONResponse(result, headers=add_cors_headers(request))
+
+
+class NotifyIn(BaseModel):
+    title: str = "琥珀记忆提醒"
+    body: str
+    url: str = ""
+
+@app.post("/notify")
+def push_notify(body_in: NotifyIn, request: Request = None, authorization: str = Header(None)):
+    """
+    通过 huper.org 推送浏览器通知（需要用户已在 huper.org 授权推送）。
+    amber-proactive agent 在主动召回成功时调用此端点。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    api_token = get_api_token()
+    huper_url = get_huper_url() or "https://huper.org/api"
+
+    try:
+        import httpx
+        with httpx.Client(timeout=10.0, trust_env=False) as client:
+            resp = client.post(
+                f"{huper_url}/notify",
+                json={"title": body_in.title, "body": body_in.body, "url": body_in.url},
+                headers={"Authorization": f"Bearer {api_token}"},
+            )
+            if resp.status_code in (200, 201):
+                return JSONResponse({"ok": True})
+            return JSONResponse({"ok": False, "error": f"huper responded {resp.status_code}"}, status_code=502)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+class SyncResolveIn(BaseModel):
+    capsule_id: str
+    decision: str  # "keep_local" | "keep_cloud"
+
+@app.post("/sync/resolve")
+def sync_resolve(body: SyncResolveIn, request: Request, authorization: str = Header(None)):
+    """
+    手动解决同步冲突。
+    decision: "keep_local" → 上传本地版本到云端覆盖
+             "keep_cloud"  → 从云端拉取覆盖本地
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    if body.decision not in ("keep_local", "keep_cloud"):
+        return JSONResponse({"error": "decision must be keep_local or keep_cloud"}, status_code=400)
+
+    api_token = get_api_token()
+    huper_url = get_huper_url() or "https://huper.org/api"
+    master_pw = get_master_password()
+    if not master_pw:
+        return JSONResponse({"error": "master_password not set"}, status_code=400)
+
+    cap_id = body.capsule_id
+    conn = _get_conn()
+    c = conn.cursor()
+
+    if body.decision == "keep_local":
+        # 读取本地胶囊并重新上传到云端
+        row = c.execute(
+            "SELECT id,memo,content,tags,session_id,window_title,url,created_at,updated_at,"
+            "salt,nonce,encrypted_len,content_hash,source_type,category "
+            "FROM capsules WHERE id=?",
+            (cap_id,)
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "capsule not found locally"}, status_code=404)
+        # 构造 single-capsule list 调用 _do_sync_capsules
+        capsule = {
+            "id": row[0], "memo": row[1], "content": row[2], "tags": row[3],
+            "session_id": row[4], "window_title": row[5], "url": row[6],
+            "created_at": row[7], "updated_at": row[8],
+            "salt": row[9], "nonce": row[10], "encrypted_len": row[11],
+            "content_hash": row[12], "source_type": row[13], "category": row[14],
+            "key_source": "pbkdf2",
+        }
+        result = _do_sync_capsules([capsule], api_token, huper_url, master_pw)
+        return JSONResponse({"ok": True, "synced": result["synced"], "errors": result.get("errors", [])[:3]})
+    else:
+        # 从云端拉取覆盖本地
+        try:
+            import httpx
+            with httpx.Client(timeout=15.0, trust_env=False) as client:
+                resp = client.get(
+                    f"{huper_url}/capsules/{cap_id}",
+                    headers={"Authorization": f"Bearer {api_token}"},
+                )
+                if resp.status_code == 404:
+                    return JSONResponse({"error": "capsule not found on cloud"}, status_code=404)
+                cloud_cap = resp.json()
+            _import_cloud_capsule(cloud_cap, master_pw)
+            return JSONResponse({"ok": True, "source": "cloud"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ── 配置读取（Dashboard 用）────────────────────────────
 class ConfigIn(BaseModel):
     auto_sync: Optional[bool] = None
@@ -2383,6 +2675,43 @@ async def update_llm_config(request: Request, authorization: str = Header(None))
     if model:
         cfg.model = model
     save_llm_config(cfg)
+    return JSONResponse({"ok": True, "provider": cfg.provider}, headers=add_cors_headers(request))
+
+# ── P1-2: Embedding 配置（Dashboard 用）───────────────────
+@app.get("/config/embedding")
+async def get_embed_config(request: Request, authorization: str = Header(None)):
+    """获取当前 embedding provider 配置（不返回 api_key 明文）"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    from core.embedding import get_cached_embed
+    cfg = get_cached_embed().config
+    return JSONResponse({
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "base_url": cfg.base_url,
+        "dimension": cfg.dimension,
+    }, headers=add_cors_headers(request))
+
+@app.put("/config/embedding")
+async def update_embed_config(request: Request, authorization: str = Header(None)):
+    """更新 embedding provider 配置"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    body = await request.json()
+    from core.embedding import EmbedConfig, save_embed_config, reset_embed_provider
+    cfg = EmbedConfig()
+    if body.get("provider"):
+        cfg.provider = body["provider"]
+    if body.get("model"):
+        cfg.model = body["model"]
+    if body.get("base_url"):
+        cfg.base_url = body["base_url"]
+    if body.get("api_key"):
+        cfg.api_key = body["api_key"]
+    if body.get("dimension"):
+        cfg.dimension = int(body["dimension"])
+    save_embed_config(cfg)
+    reset_embed_provider()  # 清除缓存，下次使用时重新加载
     return JSONResponse({"ok": True, "provider": cfg.provider}, headers=add_cors_headers(request))
 
 # ── master_password 设置（Dashboard 用）────────────────
@@ -2534,6 +2863,18 @@ def generate_insights(request: Request, authorization: str = Header(None), path:
         "insights_generated": stats["total"],
         "by_path": stats["by_path"],
     }, headers=add_cors_headers(request))
+
+# ── P2-2: Pattern Detection 端点 ────────────────────────────
+@app.get("/patterns")
+def get_patterns(request: Request, authorization: str = Header(None)):
+    """
+    返回检测到的标签/分类校正模式。
+    基于 correction_log 表分析重复校正规律。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    from core.correction import analyze_corrections
+    return JSONResponse(analyze_corrections(), headers=add_cors_headers(request))
 
 # ── A2: DID 多设备身份 v1.2.22 ─────────────────────────────
 
@@ -2914,7 +3255,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.29",
+        "version":            "1.2.31",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2940,12 +3281,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.24", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.31", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.29 启动")
+    print("🌙 Amber-Hunter v1.2.31 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")

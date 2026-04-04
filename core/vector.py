@@ -1,6 +1,7 @@
 """
-core/vector.py — LanceDB 向量存储与检索（v1.2.23 P0-1）
+core/vector.py — LanceDB 向量存储与检索（v1.2.31 P1-2）
 向量胶囊写入、top_k 语义检索、删除
+Multi-embedding provider abstraction via core.embedding
 """
 from __future__ import annotations
 
@@ -9,17 +10,31 @@ from pathlib import Path
 
 HOME = Path.home()
 VECTOR_DIR = HOME / ".amber-hunter" / "lance_db"
-_EMBED_MODEL = None  # 模块级缓存
+
+# P1-2: 使用统一的 embedding provider 而非 hardcoded MiniLM
+_embed_provider = None
 
 
-def _get_embed_model():
-    """获取 MiniLM 向量模型（lazy load，线程安全）"""
-    global _EMBED_MODEL
-    if _EMBED_MODEL is not None:
-        return _EMBED_MODEL
-    from sentence_transformers import SentenceTransformer
-    _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-    return _EMBED_MODEL
+def _get_embed_provider():
+    """获取 embedding provider（lazy load，线程安全）。"""
+    global _embed_provider
+    if _embed_provider is not None:
+        return _embed_provider
+    from core.embedding import get_cached_embed
+    _embed_provider = get_cached_embed()
+    return _embed_provider
+
+
+def reset_embed_provider():
+    """重置缓存的 provider（配置变更后调用）。
+
+    同时清除 vector 本地缓存和 embedding 模块缓存，确保下次调用重新加载。
+    """
+    global _embed_provider
+    _embed_provider = None
+    # 同步重置 embedding 模块的全局缓存
+    from core.embedding import reset_embed_provider as _reset_global
+    _reset_global()
 
 
 def init_vector_db() -> "lancedb.db.LanceDB":
@@ -30,12 +45,16 @@ def init_vector_db() -> "lancedb.db.LanceDB":
     VECTOR_DIR.mkdir(parents=True, exist_ok=True)
     db = lancedb.connect(str(VECTOR_DIR))
 
+    # P1-2: 获取 dimension（不同 provider 不同维度）
+    provider = _get_embed_provider()
+    dim = provider.config.dimension if hasattr(provider, 'config') else 384
+
     try:
         if "capsule_vectors" not in db.list_tables():
             schema = pa.schema([
                 ("capsule_id", pa.string()),
                 ("text", pa.string()),
-                ("vector", pa.list_(pa.float32(), 384)),  # FixedSizeList(384)
+                ("vector", pa.list_(pa.float32(), dim)),
                 ("created_at", pa.float64()),
             ])
             db.create_table("capsule_vectors", schema=schema)
@@ -47,18 +66,21 @@ def init_vector_db() -> "lancedb.db.LanceDB":
 
 def index_capsule(capsule_id: str, memo: str, created_at: float) -> bool:
     """
-    计算 memo 的 384 维 embedding，存入 LanceDB。
+    计算 memo 的 embedding，存入 LanceDB。
     memo 为解密后原文（memo 字段不加密，content 字段才加密）。
+    P1-2: 使用统一的 embedding provider。
     """
     try:
         db = init_vector_db()
-        model = _get_embed_model()
-        vec = model.encode(memo[:512])  # 截断避免超长
+        provider = _get_embed_provider()
+        vec = provider.encode(memo[:512])  # 截断避免超长
+        # encode 返回 np.ndarray，单个向量展平
+        vec_list = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
         tbl = db.open_table("capsule_vectors")
         tbl.add([{
             "capsule_id": capsule_id,
             "text": memo[:512],
-            "vector": vec.tolist(),
+            "vector": vec_list,
             "created_at": created_at,
         }])
         return True
@@ -73,13 +95,15 @@ def search_vectors(query: str, limit: int = 20) -> list[dict]:
     LanceDB top_k 语义检索。
     返回 [{capsule_id, lance_score, text}, ...]
     lance_score = 1 - normalized_distance（越大越相关，1=完全匹配）
+    P1-2: 使用统一的 embedding provider。
     """
     try:
         db = init_vector_db()
-        model = _get_embed_model()
-        q_vec = model.encode(query[:512])
+        provider = _get_embed_provider()
+        q_vec = provider.encode(query[:512])
+        q_list = q_vec.tolist() if hasattr(q_vec, 'tolist') else list(q_vec)
         tbl = db.open_table("capsule_vectors")
-        rs = tbl.search(q_vec.tolist(), vector_column_name="vector") \
+        rs = tbl.search(q_list, vector_column_name="vector") \
               .limit(limit) \
               .to_list()
         return [

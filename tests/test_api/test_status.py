@@ -12,8 +12,8 @@ def test_status_returns_version_and_model_state(test_client):
     assert response.status_code == 200
     data = response.json()
 
-    # v1.2.13 版本
-    assert data["version"] == "1.2.13"
+    # v1.2.31 版本
+    assert data["version"] == "1.2.31"
 
     # 语义模型状态字段
     assert "semantic_model_state" in data
