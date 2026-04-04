@@ -27,7 +27,8 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, count_
     save_tag_feedback, get_tag_feedback,
     _get_conn)
 from core.vector import index_capsule, search_vectors, delete_vector, get_vector_stats
-from core.session import get_current_session_key, build_session_summary, get_recent_files
+from core.wal import write_wal_entry, read_wal_entries, get_wal_stats, _detect_signal_type
+from core.session import get_current_session_key, build_session_summary, get_recent_files, read_session_messages
 from core.models import CapsuleIn, CapsuleUpdate
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
 
@@ -709,7 +710,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.15")
+app = FastAPI(title="Amber Hunter", version="1.2.24")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1457,6 +1458,26 @@ def recall_memories(
     # 可选：LLM 重排序
     if rerank and memories:
         memories = _rerank_memories_llm(q, memories)
+
+    # ── P0-2: WAL 热状态检测 ──────────────────────────────────
+    # 在返回前，检测 session 中的偏好/决定/修正信号并写入 WAL
+    if q:
+        try:
+            session_key = get_current_session_key()
+            if session_key:
+                messages = read_session_messages(session_key, limit=10)
+                for m in messages:
+                    if m.get("role") != "user":
+                        continue
+                    text = m.get("text", "")
+                    if not text or len(text) < 5:
+                        continue
+                    sig_type = _detect_signal_type(text)
+                    if sig_type:
+                        entry_data = {"text": text[:500], "signal": sig_type}
+                        write_wal_entry(session_key, sig_type, entry_data)
+        except Exception:
+            pass  # WAL 失败不影响 recall 返回
 
     return JSONResponse({
         "memories":          memories[:limit],
@@ -2623,6 +2644,26 @@ def did_auth_sign_challenge(
         return JSONResponse({"error": f"网络错误: {e}"}, status_code=500)
 
 
+# ── P0-2: WAL 热存储端点（无需认证）──────────────────────
+
+@app.get("/wal/status")
+def wal_status():
+    """返回 WAL 统计信息（总数 + 各类型计数）"""
+    return JSONResponse(get_wal_stats())
+
+
+@app.get("/wal/entries")
+def wal_entries(session_id: str = ""):
+    """
+    读取当前（或指定）session 的 WAL 条目。
+    ?session_id=xxx 可指定，不提供则用当前 session
+    """
+    key = session_id or get_current_session_key()
+    if not key:
+        return JSONResponse({"entries": []})
+    return JSONResponse({"entries": read_wal_entries(key)})
+
+
 # ── 服务状态（无需认证）────────────────────────────────
 @app.get("/status")
 def get_status(request: Request):
@@ -2662,7 +2703,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.23",
+        "version":            "1.2.24",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2688,12 +2729,12 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.23", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.24", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.23 启动")
+    print("🌙 Amber-Hunter v1.2.24 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
