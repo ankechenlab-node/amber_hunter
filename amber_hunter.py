@@ -26,6 +26,7 @@ from core.db import (init_db, insert_capsule, get_capsule, list_capsules, count_
     insert_memory_hit, update_capsule_hit,
     save_tag_feedback, get_tag_feedback,
     _get_conn)
+from core.vector import index_capsule, search_vectors, delete_vector, get_vector_stats
 from core.session import get_current_session_key, build_session_summary, get_recent_files
 from core.models import CapsuleIn, CapsuleUpdate
 from core.llm import get_llm, LLM_AVAILABLE as LLM_READY, load_llm_config, save_llm_config, LLMConfig
@@ -1004,6 +1005,13 @@ def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), reques
         key_source=key_source,
     )
 
+    # ── P0-1: 写入 LanceDB 向量索引 ────────────────────
+    if capsule.memo:
+        try:
+            index_capsule(capsule_id, capsule.memo, now)
+        except Exception as e:
+            logging.warning(f"[create_capsule] vector index failed: {e}")
+
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"id": capsule_id, "created_at": now, "synced": False}, headers=h)
 
@@ -1064,6 +1072,11 @@ def delete_capsule(capsule_id: str, authorization: str = Header(None), request: 
     c.execute("DELETE FROM capsules WHERE id=?", (capsule_id,))
     conn.commit()
     conn.close()
+    # P0-1: 删除 LanceDB 向量
+    try:
+        delete_vector(capsule_id)
+    except Exception:
+        pass
     h = add_cors_headers(request) if request else {}
     return JSONResponse({"status": "ok"}, headers=h)
 
@@ -1279,62 +1292,73 @@ def recall_memories(
     # 归一化关键词分到 0-1
     kw_norm = [(s / max_kw, c) for s, c in kw_scores]
 
-    # ── 语义评分（全量，v1.2.3 修复：不再只对关键词候选做）────
+    # ── P0-1: 语义评分（LanceDB 优先，on-the-fly 回退）────
     search_mode = mode
     sem_scores: dict[str, float] = {}  # capsule_id -> semantic similarity
 
     if mode in ("auto", "semantic", "hybrid"):
+        # P0-1: 先用 LanceDB 向量检索
         try:
-            import numpy as _np
-            model = _get_embed_model(blocking=False)
-            if model is None:
-                if _MODEL_LOADING:
-                    return JSONResponse({
-                        "error": "语义模型正在加载中，请稍后重试",
-                        "code": "MODEL_LOADING",
-                        "retry_after": 10,
-                    }, status_code=503, headers=add_cors_headers(request))
-                raise ImportError("embedding model not available")
-            q_vec = model.encode(q)
-            texts = [c["_text"][:512] for c in parsed]
-            if texts:
-                cap_vecs = model.encode(texts)
-                norms = _np.linalg.norm(cap_vecs, axis=1) * _np.linalg.norm(q_vec) + 1e-8
-                sims = _np.dot(cap_vecs, q_vec) / norms
-                for i, cap in enumerate(parsed):
-                    sem_scores[cap["id"]] = float(sims[i])
-            search_mode = "hybrid" if mode in ("auto", "hybrid") else "semantic"
-        except ImportError:
-            if mode == "semantic":
-                return JSONResponse(
-                    {"error": "语义搜索需要 sentence-transformers，请运行：pip install sentence-transformers"},
-                    status_code=400, headers=add_cors_headers(request)
-                )
-            search_mode = "keyword"
+            vector_results = search_vectors(q, limit=limit * 3)
+            if vector_results:
+                for r in vector_results:
+                    sem_scores[r["capsule_id"]] = r["lance_score"]
+                search_mode = "hybrid" if mode in ("auto", "hybrid") else "semantic"
+            else:
+                raise FileNotFoundError("empty vector index")
+        except Exception:
+            # on-the-fly 回退
+            try:
+                import numpy as _np
+                model = _get_embed_model(blocking=False)
+                if model is None:
+                    if _MODEL_LOADING:
+                        return JSONResponse({
+                            "error": "语义模型正在加载中，请稍后重试",
+                            "code": "MODEL_LOADING",
+                            "retry_after": 10,
+                        }, status_code=503, headers=add_cors_headers(request))
+                    raise ImportError("embedding model not available")
+                q_vec = model.encode(q)
+                texts = [c["_text"][:512] for c in parsed]
+                if texts:
+                    cap_vecs = model.encode(texts)
+                    norms = _np.linalg.norm(cap_vecs, axis=1) * _np.linalg.norm(q_vec) + 1e-8
+                    sims = _np.dot(cap_vecs, q_vec) / norms
+                    for i, cap in enumerate(parsed):
+                        sem_scores[cap["id"]] = float(sims[i])
+                search_mode = "hybrid" if mode in ("auto", "hybrid") else "semantic"
+            except ImportError:
+                if mode == "semantic":
+                    return JSONResponse(
+                        {"error": "语义搜索需要 sentence-transformers，请运行：pip install sentence-transformers"},
+                        status_code=400, headers=add_cors_headers(request)
+                    )
+                search_mode = "keyword"
 
     # ── 混合评分 + 排序（含 recency/hotness）────────────────
     now_ts = time.time()
     combined = []
     for kw_n, cap in kw_norm:
-        sem = sem_scores.get(cap["id"], 0.0)
+        lance = sem_scores.get(cap["id"], 0.0)  # P0-1: LanceDB score (或 on-the-fly 回退)
         # 时间衰减：90天完全衰减到 0.37
         days_old = (now_ts - cap.get("created_at", now_ts)) / 86400
         recency = max(0.0, 1.0 - days_old / 90)
         # 热力值：已有 hit 数据用于加权
         hotness = min(1.0, cap.get("hotness_score", 0) / 10)
         if search_mode == "hybrid":
-            final = 0.35 * kw_n + 0.40 * sem + 0.15 * recency + 0.10 * hotness
+            final = 0.30 * kw_n + 0.50 * lance + 0.12 * recency + 0.08 * hotness
         elif search_mode == "semantic":
-            final = 0.70 * sem + 0.20 * recency + 0.10 * hotness
+            final = 0.80 * lance + 0.12 * recency + 0.08 * hotness
         else:
             final = 0.80 * kw_n + 0.15 * recency + 0.05 * hotness
-        combined.append((final, kw_n, sem, recency, hotness, cap))
+        combined.append((final, kw_n, lance, recency, hotness, cap))
 
     # 过滤掉完全无信号的结果
     if search_mode == "keyword":
-        combined = [(s, kw_n, sem, r, h, c) for s, kw_n, sem, r, h, c in combined if s > 0]
+        combined = [(s, kw_n, lance, r, h, c) for s, kw_n, lance, r, h, c in combined if s > 0]
     else:
-        combined = [(s, kw_n, sem, r, h, c) for s, kw_n, sem, r, h, c in combined if s > 0.05]
+        combined = [(s, kw_n, lance, r, h, c) for s, kw_n, lance, r, h, c in combined if s > 0.05]
 
     combined.sort(key=lambda x: x[0], reverse=True)
     top = combined[:limit]
@@ -1377,7 +1401,7 @@ def recall_memories(
             related_map[cap["id"]] = []
 
     # ── 组装返回 ─────────────────────────────────
-    def _build_memory(score: float, kw_n: float, sem: float, recency: float, hotness: float, cap: dict, related_ids: list) -> dict:
+    def _build_memory(score: float, kw_n: float, lance: float, recency: float, hotness: float, cap: dict, related_ids: list) -> dict:
         memo = cap.get("memo", "")
         plain = cap.get("_plain_content", "")
         tags = cap.get("tags", "")
@@ -1393,7 +1417,7 @@ def recall_memories(
         parts = []
         if kw_n > 0.5:
             parts.append("关键词命中")
-        if sem > 0.5:
+        if lance > 0.5:
             parts.append("语义相似")
         if recency > 0.8:
             parts.append("近期记忆")
@@ -1414,7 +1438,7 @@ def recall_memories(
             "relevance_score": round(score, 3),
             "breakdown": {
                 "keyword_score": round(kw_n, 3),
-                "semantic_score": round(sem, 3),
+                "semantic_score": round(lance, 3),  # P0-1: lance_score (or on-the-fly fallback)
                 "recency_score": round(recency, 3),
                 "hotness_score": round(hotness, 3),
             },
@@ -1424,7 +1448,7 @@ def recall_memories(
             "hit_url":         f"/recall/{cap['id']}/hit",
         }
 
-    memories = [_build_memory(s, kw_n, sem, r, h, c, related_map.get(c["id"], [])) for s, kw_n, sem, r, h, c in top]
+    memories = [_build_memory(s, kw_n, lance, r, h, c, related_map.get(c["id"], [])) for s, kw_n, lance, r, h, c in top]
 
     # 清理解密明文
     del parsed
@@ -2638,7 +2662,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.20",
+        "version":            "1.2.23",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -2658,17 +2682,18 @@ def get_status(request: Request):
         "queue_pending":      db_stats["queue_pending"],
         "last_sync":          db_stats["last_sync"],
         "sync_last_error":   sync_last_error,
+        "vector_index":      get_vector_stats(),
     }, headers=h)
 
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.20", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.23", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
     init_db()
-    print("🌙 Amber-Hunter v1.2.22 启动")
+    print("🌙 Amber-Hunter v1.2.23 启动")
     print(f"   Session目录: {HOME / '.openclaw' / 'agents'}")
     print(f"   Workspace:   {HOME / '.openclaw' / 'workspace'}")
     print(f"   数据库:      {HOME / '.amber-hunter' / 'hunter.db'}")
