@@ -307,6 +307,66 @@ curl "http://localhost:18998/queue?token=$(curl -s localhost:18998/token | pytho
 
 ---
 
+## FAQ & Known Issues
+
+### Q: amber-hunter runs on a VPS, not my local Mac. How do I configure the API key?
+
+When amber-hunter is on a **different machine** than your browser, the dashboard's "Generate API Key" button can't auto-bind (it POSTs to `127.0.0.1:18998` which is your local machine, not the VPS).
+
+**Manual setup on the VPS:**
+
+```bash
+# Option 1: environment variable (recommended for VPS)
+echo 'export AMBER_TOKEN="your_api_key_here"' >> ~/.bashrc
+source ~/.bashrc
+
+# Option 2: write directly to config.json
+mkdir -p ~/.amber-hunter
+cat >> ~/.amber-hunter/config.json << 'EOF'
+{"api_token": "your_api_key_here"}
+EOF
+
+# Then restart amber-hunter
+launchctl unload ~/Library/LaunchAgents/com.huper.amber-hunter.plist
+launchctl load ~/Library/LaunchAgents/com.huper.amber-hunter.plist
+```
+
+**How to get the API key:**
+1. Go to huper.org → Dashboard → Account → API Key
+2. Click "Generate API Key" and copy the key immediately (it's only shown once)
+
+### Q: Dashboard shows "尚未生成API Key" even after I generated one
+
+This is a UI bug in older versions. Update to the latest version, or refresh the dashboard page. The key is stored correctly in the database — the display just wasn't updating after generation.
+
+### Q: Sync shows "network unreachable" or "Token 无效" errors
+
+**If amber-hunter is on a VPS:** The `api_token` in config.json may be empty or wrong. Verify:
+
+```bash
+cat ~/.amber-hunter/config.json | grep api_token
+```
+
+If empty, the VPS can't reach huper.org cloud sync. Manually set the `api_token` as shown in the FAQ above.
+
+**If amber-hunter is on your local Mac:** Make sure `bind-apikey` completed successfully (it runs automatically after generating a key). Check:
+
+```bash
+curl -s http://localhost:18998/config | python3 -c "import sys,json; d=json.load(sys.stdin); print('api_token:', d.get('api_key','(not set)')[:10]+'...')"
+```
+
+### Q: I generated a new API Key but amber-hunter on VPS stopped syncing
+
+Each key can only be used by **one** amber-hunter instance at a time. If you generate a new key from the dashboard, the old key (still configured on VPS) becomes invalid. Either:
+- Copy the new key to the VPS config and restart
+- Or keep using the old key (don't click "Generate New Key" unless you mean to rotate it)
+
+### Q: "尚未生成API Key" never goes away on first use
+
+This means you haven't generated an API key yet. Click the orange "生成 API Key" button on the Dashboard → Account → API Key page. The key is shown once — copy it immediately and save it somewhere before leaving the page.
+
+---
+
 ## Version History
 
 - **v1.2.29** (2026-04-04): G1 Self-Correction Loop — `correction_log` SQLite 表记录每次校正事件；`_normalize_tag` 应用用户校正规则（5分钟缓存）；`record_tag_correction` / `record_category_correction` 在 queue edit 时调用；`GET /corrections/stats` 分析校正模式；`POST /corrections/apply` 采纳替换规则。
