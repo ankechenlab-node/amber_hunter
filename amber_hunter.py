@@ -715,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.34")
+app = FastAPI(title="Amber Hunter", version="1.2.35")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -2981,6 +2981,8 @@ class TrainIn(BaseModel):
     iterations: int = 300
     lr: float = 1e-3
     batch_size: int = 32
+    use_gpt2_pretrain: bool = True  # 是否用 GPT-2 预训练权重初始化
+    incremental: bool = True         # 是否从 checkpoint 继续
 
 
 @app.post("/admin/train")
@@ -2988,11 +2990,12 @@ def admin_train(request: Request, body: TrainIn, authorization: str = Header(Non
     """
     在用户记忆数据上 fine-tune AmberGPT。
     使用 auto-research 优化超参（N_HEAD=1, BLOCK_SIZE=96, N_EMBED=256, N_LAYER=6）。
+    支持 GPT-2 预训练初始化和增量训练。
 
     curl -X POST http://localhost:18998/admin/train \
       -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{"vocab_size":2500,"iterations":300}'
+      -d '{"vocab_size":2500,"iterations":300,"use_gpt2_pretrain":true}'
     """
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
@@ -3007,6 +3010,8 @@ def admin_train(request: Request, body: TrainIn, authorization: str = Header(Non
             iterations=body.iterations,
             lr=body.lr,
             batch_size=body.batch_size,
+            use_gpt2_pretrain=body.use_gpt2_pretrain,
+            incremental=body.incremental,
         )
         # 重置 trainer 单例以加载新模型
         AmberTrainer._instance = None
@@ -3016,7 +3021,7 @@ def admin_train(request: Request, body: TrainIn, authorization: str = Header(Non
     thread.start()
     return JSONResponse({
         "started": True,
-        "message": f"Training started in background (vocab_size={body.vocab_size}, iterations={body.iterations})",
+        "message": f"Training started (vocab_size={body.vocab_size}, iterations={body.iterations}, gpt2={body.use_gpt2_pretrain}, incremental={body.incremental})",
         "check_status": "GET /admin/train/status",
     }, headers=h)
 
@@ -3026,11 +3031,25 @@ def train_status(request: Request, authorization: str = Header(None)):
     """检查本地模型训练状态"""
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
-    from core.trainer import is_trained, AmberTrainer, get_trainer
+    from core.trainer import is_trained, AmberTrainer, get_trainer, MODEL_PATH
+    import torch
     at = get_trainer()
+    trained_info = {}
+    if is_trained():
+        try:
+            ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
+            trained_info = {
+                "iterations": ckpt.get("iterations", "?"),
+                "val_loss": round(ckpt.get("val_loss", 0), 4),
+                "tag_vocab_size": ckpt.get("tag_vocab_size", 0),
+            }
+        except Exception:
+            pass
     return JSONResponse({
         "is_trained": is_trained(),
         "model_ready": at.is_ready(),
+        "has_tag_head": at.has_tag_head(),
+        **trained_info,
     }, headers=add_cors_headers(request))
 
 
@@ -3049,6 +3068,22 @@ def train_score(request: Request, authorization: str = Header(None)):
         return JSONResponse({"error": "model not trained yet", "trained": False}, status_code=400)
     score = at.score(query, memory)
     return JSONResponse({"score": round(score, 4), "trained": True}, headers=add_cors_headers(request))
+
+
+@app.get("/admin/train/tags")
+def train_tags(request: Request, authorization: str = Header(None)):
+    """预测文本标签（需先训练有分类头的模型）"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    text = request.query_params.get("text", "")
+    if not text:
+        return JSONResponse({"error": "text param required"}, status_code=400)
+    from core.trainer import get_trainer
+    at = get_trainer()
+    if not at.has_tag_head():
+        return JSONResponse({"error": "tag head not available (needs training with incremental=True)", "has_tag_head": False}, status_code=400)
+    tags = at.predict_tags(text)
+    return JSONResponse({"tags": [{"tag": t, "score": round(s, 4)} for t, s in tags], "has_tag_head": True}, headers=add_cors_headers(request))
 
 
 # ── 统计面板（需认证）────────────────────────────────────
@@ -3659,7 +3694,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.34",
+        "version":            "1.2.35",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -3685,7 +3720,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.34", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.35", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
