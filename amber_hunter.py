@@ -2082,8 +2082,6 @@ def review_queue(request: Request = None, authorization: str = Header(None)):
         return JSONResponse({"lines": lines, "count": len(pending), "items": pending}, headers=h)
     return JSONResponse({"lines": lines, "count": len(pending)}, headers=h)
 
-    return JSONResponse({"lines": lines, "count": len(pending), "items": pending}, headers=h)
-
 
 @app.post("/-review/{qid}")
 def review_item(qid: str, request: Request = None, authorization: str = Header(None)):
@@ -2789,6 +2787,56 @@ def backfill_paths(request: Request, authorization: str = Header(None), dry_run:
         "would_update": stats["updated"],
         "by_path": stats["by_path"],
     }, headers=add_cors_headers(request))
+
+
+# ── 向量索引重建（需认证）────────────────────────────────
+@app.post("/admin/reindex-vectors")
+def reindex_vectors(request: Request, authorization: str = Header(None)):
+    """
+    重建 LanceDB 向量索引，遍历所有胶囊并重新索引 memo 字段。
+    用于首次填充向量索引或切换 embedding provider 后的重建。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    from core.vector import init_vector_db, index_capsule, reset_embed_provider
+    import time
+
+    # 重置 embedding provider 缓存，确保使用最新配置
+    reset_embed_provider()
+
+    conn = _get_conn()
+    c = conn.cursor()
+    rows = c.execute(
+        "SELECT id, memo, created_at FROM capsules WHERE memo IS NOT NULL AND memo != ''"
+    ).fetchall()
+
+    indexed = 0
+    failed = 0
+    start = time.time()
+
+    for cid, memo, created_at in rows:
+        try:
+            if index_capsule(cid, memo, created_at or time.time()):
+                indexed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+
+    from core.vector import get_vector_stats
+    stats = get_vector_stats()
+    elapsed = time.time() - start
+
+    logging.info(f"[reindex-vectors] indexed={indexed} failed={failed} elapsed={elapsed:.1f}s")
+    return JSONResponse({
+        "indexed": indexed,
+        "failed": failed,
+        "total": len(rows),
+        "vector_count": stats.get("count", 0),
+        "elapsed_seconds": round(elapsed, 1),
+    }, headers=add_cors_headers(request))
+
 
 # ── Insight 缓存生成（需认证）───────────────────────────────
 @app.post("/admin/generate-insights")

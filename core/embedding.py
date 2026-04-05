@@ -82,7 +82,10 @@ class MiniLMProvider(EmbedProvider):
     def encode(self, texts: Union[str, list[str]]) -> np.ndarray:
         if MiniLMProvider._model is None:
             from sentence_transformers import SentenceTransformer
-            MiniLMProvider._model = SentenceTransformer(self.config.model or "all-MiniLM-L6-v2")
+            MiniLMProvider._model = SentenceTransformer(
+                self.config.model or "all-MiniLM-L6-v2",
+                local_files_only=True,  # 避免网络超时，从本地缓存加载
+            )
         return MiniLMProvider._model.encode(texts)
 
 

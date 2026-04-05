@@ -50,7 +50,7 @@ def init_vector_db() -> "lancedb.db.LanceDB":
     dim = provider.config.dimension if hasattr(provider, 'config') else 384
 
     try:
-        if "capsule_vectors" not in db.list_tables():
+        if "capsule_vectors" not in db.list_tables().tables:
             schema = pa.schema([
                 ("capsule_id", pa.string()),
                 ("text", pa.string()),
@@ -137,7 +137,7 @@ def get_vector_stats() -> dict:
     """返回向量库统计信息（用于调试和 /status）。"""
     try:
         db = init_vector_db()
-        if "capsule_vectors" not in db.list_tables():
+        if "capsule_vectors" not in db.list_tables().tables:
             return {"count": 0, "vector_db_size_mb": 0}
         tbl = db.open_table("capsule_vectors")
         count = tbl.count_rows()
