@@ -369,6 +369,11 @@ This means you haven't generated an API key yet. Click the orange "生成 API Ke
 
 ## Version History
 
+- **v1.2.34** (2026-04-05): Push Notifications — `POST /notify` 端点调用 huper.org 推送浏览器通知；修复 P2-2 WAL dead code（移除无效 wal_signals 预加载）；queue edit 预生成 cap_id 关联校正记录；`/-review` 支持 `?format=text|json`。
+- **v1.2.33** (2026-04-05): Incremental Sync + MCP Server — `get_unsynced_capsules(since=last_sync_at)` 增量同步；`POST /mcp` MCP 协议处理器暴露 7 个工具（recall_memories/create_memory/list_memories/get_memory/update_memory/delete_memory/get_stats）；`GET /stats` 返回胶囊统计/热力分布/WAL 状态/向量统计；`GET /admin/export` 备份导出；`POST /sync/resolve/{id}` 冲突解决。
+- **v1.2.32** (2026-04-05): `POST /admin/reindex-vectors` 重建 LanceDB 向量索引；修复 `list_tables()` Pydantic 对象访问（`.tables` 属性）；`local_files_only=True` 避免 HuggingFace 下载超时。
+- **v1.2.31** (2026-04-04): Multi-Embedding Provider — `core/embedding.py` 支持 MiniLM / Voyage / OpenAI / Ollama；`core/vector.py` 使用统一 `get_embed()` 接口；recall cooldown 逻辑（30分钟内召回过的胶囊压制分数至 0）。
+- **v1.2.30** (2026-04-04): `_auto_tag_local()` 规则化自动标签（18个分类）；`POST /admin/reindex-vectors` 端点；修复 WAL `processed_count` 统计。
 - **v1.2.29** (2026-04-04): G1 Self-Correction Loop — `correction_log` SQLite 表记录每次校正事件；`_normalize_tag` 应用用户校正规则（5分钟缓存）；`record_tag_correction` / `record_category_correction` 在 queue edit 时调用；`GET /corrections/stats` 分析校正模式；`POST /corrections/apply` 采纳替换规则。
 - **v1.2.28** (2026-04-04): P2-1 Mem0 Auto-extraction — `core/extractor.py` 从对话自动抽取 facts/preferences/decisions；`POST /extract/auto` 高置信直接入库/中置信进队列；`GET /extract/status` 查看抽取统计；结合 WAL 信号 + 偏好提取 + LLM 结构化抽取三重机制。
 - **v1.2.27** (2026-04-04): P1-1 Structured User Profile — `user_profile` SQLite 表；`core/profile.py` LLM extraction；`GET /profile` 返回四段画像；`PUT /profile/{section}` 手动更新；`POST /profile/build` 从 session 构建；recall 响应注入 `profile` 字段。

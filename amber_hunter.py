@@ -715,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.32")
+app = FastAPI(title="Amber Hunter", version="1.2.34")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1397,17 +1397,6 @@ def recall_memories(
                     )
                 search_mode = "keyword"
 
-    # ── P0-3: WAL 信号预加载（correction 信号的 capsule_id 关联）────
-    wal_signals: dict[str, dict] = {}  # capsule_id -> wal_entry
-    try:
-        _session_key = get_current_session_key()
-        if _session_key:
-            for e in read_wal_entries(_session_key, processed=False):
-                cid = e.get("data", {}).get("capsule_id")
-                if cid:
-                    wal_signals[cid] = e
-    except Exception:
-        pass
 
     # ── 混合评分 + 排序（含 recency/hotness）────────────────
     now_ts = time.time()
@@ -1558,7 +1547,7 @@ def recall_memories(
         }
 
     memories = [
-        _build_memory(s, kw_n, lance, r, h, c, related_map.get(c["id"], []), terms, wal_signals.get(c["id"]))
+        _build_memory(s, kw_n, lance, r, h, c, related_map.get(c["id"], []), terms, None)
         for s, kw_n, lance, r, h, c, terms in top
     ]
 
@@ -2045,6 +2034,7 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
     final_tags = body.tags or item["tags"]
 
     # ── G1: 记录校正事件 ────────────────────────────────
+    cap_id_for_correction = secrets.token_hex(8)  # 预生成用于关联校正记录
     try:
         from core.correction import record_tag_correction, record_category_correction
         # 标签校正
@@ -2066,7 +2056,7 @@ def edit_queue_item(qid: str, body: QueueEditIn, request: Request = None,
         pass  # 校正记录失败不影响入库
 
     queue_update(qid, final_memo, final_category, final_tags)
-    cap_id = secrets.token_hex(8)
+    cap_id = cap_id_for_correction
     insert_capsule(
         capsule_id=cap_id,
         memo=final_memo,
@@ -2169,6 +2159,59 @@ def review_item(qid: str, request: Request = None, authorization: str = Header(N
     else:
         queue_set_status(qid, "rejected")
         return JSONResponse({"qid": qid, "action": "rejected"}, headers=h)
+
+
+# ── Push Notifications（v1.2.34）────────────────────────────
+class NotifyBody(BaseModel):
+    title: str = "琥珀记忆"
+    body: str = ""
+    tag: str = "amber-hunter"
+    url: str = ""
+
+
+@app.post("/notify")
+def send_notification(request: Request, body: NotifyBody, authorization: str = Header(None)):
+    """
+    通过 huper.org 推送浏览器通知。
+    需要 master_password 已配置（通知权限验证）。
+    curl -X POST http://localhost:18998/notify \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"title":"新记忆","body":"已捕获一条重要记忆"}'
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    h = add_cors_headers(request)
+
+    api_token = get_api_token()
+    huper_url = get_huper_url() or "https://huper.org/api"
+    if not api_token:
+        return JSONResponse({"error": "huper API token not configured"}, status_code=400, headers=h)
+
+    try:
+        import httpx
+        payload = {
+            "title": body.title,
+            "body": body.body,
+            "tag": body.tag,
+            "url": body.url or f"{huper_url}/dashboard",
+        }
+        resp = httpx.post(
+            f"{huper_url}/notify",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=10.0,
+        )
+        if resp.status_code in (200, 201):
+            return JSONResponse({"sent": True, "title": body.title}, headers=h)
+        return JSONResponse({"sent": False, "status": resp.status_code, "detail": resp.text[:200]}, status_code=502, headers=h)
+    except httpx.ConnectError:
+        # huper.org 不可达（本地网络或服务器宕机）
+        return JSONResponse({"sent": False, "error": "huper.org unreachable"}, status_code=503, headers=h)
+    except Exception as e:
+        import sys
+        print(f"[notify] failed: {e}", file=sys.stderr)
+        return JSONResponse({"sent": False, "error": str(e)}, status_code=500, headers=h)
 
 
 # ── 后台同步 helper（供 freeze 自动触发 & 定时器共用）────────────
@@ -3540,7 +3583,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.32",
+        "version":            "1.2.34",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -3566,7 +3609,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.31", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.34", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
