@@ -1,6 +1,6 @@
 # Amber-Hunter Skill
 > Gives any AI client long-term memory — captures, encrypts, and recalls personal context across sessions
-> Version: 1.2.32 | 2026-04-05
+> Version: 1.2.33 | 2026-04-05
 
 ---
 
