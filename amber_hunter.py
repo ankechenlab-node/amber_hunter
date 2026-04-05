@@ -715,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.35")
+app = FastAPI(title="Amber Hunter", version="1.2.36")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -1183,7 +1183,8 @@ def recall_memories(
     q: str = "",
     limit: int = 3,
     mode: str = "auto",
-    rerank: bool = False,
+    rerank: bool = False,  # deprecated, use rerank_engine
+    rerank_engine: str = "auto",
     category_path: str = "",
     use_insights: bool = True,
     authorization: str = Header(None),
@@ -1195,10 +1196,12 @@ def recall_memories(
       q: 搜索查询（用户当前消息）
       limit: 返回记忆数量（默认 3）
       mode: keyword | semantic | auto/hybrid（默认 auto）
-      rerank: 是否用 LLM 重排序（默认 False，LLM调用昂贵）
+      rerank: (deprecated) 是否用 LLM 重排序，等价于 rerank_engine="llm"
+      rerank_engine: auto | model | llm | none（默认 auto：模型优先，失败降级 LLM）
       category_path: MFS路径过滤（如 "projects/huper"），支持前缀匹配
 
     v1.2.3: hybrid 模式对全量胶囊做语义+关键词联合评分，不再只对关键词候选做语义
+    v1.2.35: rerank_engine 支持本地模型自动降级
     """
     raw_token = _extract_bearer_token(request, authorization)
     verify_token(raw_token)
@@ -1555,9 +1558,11 @@ def recall_memories(
     del parsed
     gc.collect()
 
-    # 可选：LLM 重排序
-    if rerank and memories:
-        memories = _rerank_memories_llm(q, memories)
+    # 可选：重排序（自动降级：模型 → LLM → 原顺序）
+    if memories:
+        engine = "llm" if rerank else rerank_engine
+        if engine != "none":
+            memories = _rerank_memories(q, memories, engine)
 
     # ── P0-2: WAL 热状态检测 ──────────────────────────────────
     # 在返回前，检测 session 中的偏好/决定/修正信号并写入 WAL
@@ -1647,6 +1652,58 @@ def record_hit(
     return JSONResponse({"ok": True}, headers=headers)
 
 
+def _rerank_memories_model(query: str, memories: list[dict]) -> list[dict]:
+    """
+    用本地 AmberTrainer 模型对 memories 重排序。
+    返回重排序后的列表；如果模型未训练或失败，返回空列表（由调用方决定是否降级）。
+    """
+    try:
+        from core.trainer import get_trainer
+        at = get_trainer()
+        if not at.is_ready():
+            return []  # 模型未训练，交给 LLM
+        texts = [(m.get("memo") or "") + " " + (m.get("content") or "")[:200] for m in memories]
+        ranked = at.rerank(query, texts, top_k=len(texts))
+        reranked = []
+        for new_idx, (orig_idx, score) in enumerate(ranked):
+            m = dict(memories[orig_idx])
+            m["relevance_score"] = round(score, 3)
+            m["_rerank_source"] = "model"
+            reranked.append(m)
+        return reranked
+    except Exception:
+        return []
+
+
+def _rerank_memories(query: str, memories: list[dict], engine: str = "auto") -> list[dict]:
+    """
+    重排序 dispatcher。
+
+    engine:
+      auto   — 先尝试模型，失败则降级 LLM
+      model  — 仅用本地模型（无模型则返回原顺序）
+      llm    — 仅用 LLM
+      none   — 不重排序
+    """
+    if not memories:
+        return memories
+
+    if engine == "none":
+        return memories
+
+    if engine in ("auto", "model"):
+        reranked = _rerank_memories_model(query, memories)
+        if reranked:
+            return reranked
+        if engine == "model":
+            return memories  # model 模式不允许降级
+
+    if engine in ("auto", "llm"):
+        return _rerank_memories_llm(query, memories)
+
+    return memories
+
+
 def _rerank_memories_llm(query: str, memories: list[dict]) -> list[dict]:
     """Re-rank a list of memory candidates using LLM.
 
@@ -1727,9 +1784,12 @@ def _rerank_memories_llm(query: str, memories: list[dict]) -> list[dict]:
 
 @app.post("/rerank")
 async def rerank_memories(request: Request, authorization: str = Header(None)):
-    """Re-rank a list of memory candidates using LLM.
+    """
+    Re-rank a list of memory candidates.
+    自动降级：模型 → LLM → 原顺序（cold-start 用户也能用）。
 
-    Body: {"query": "...", "memories": [...]}
+    Body: {"query": "...", "memories": [...], "engine": "auto"}
+    engine: auto | model | llm | none（默认 auto）
     Returns: {"memories": [...reranked...]}
     """
     raw_token = _extract_bearer_token(request, authorization)
@@ -1742,14 +1802,15 @@ async def rerank_memories(request: Request, authorization: str = Header(None)):
 
     query = body.get("query", "")
     memories = body.get("memories", [])
+    engine = body.get("engine", "auto")
 
     if not query or not memories:
         return JSONResponse({"memories": memories}, headers=add_cors_headers(request))
 
-    # Run LLM reranking in thread pool to avoid blocking event loop
+    # 自动降级：模型失败则 LLM
     import asyncio
-    reranked = await asyncio.to_thread(_rerank_memories_llm, query, memories)
-    return JSONResponse({"memories": reranked}, headers=add_cors_headers(request))
+    reranked = await asyncio.to_thread(_rerank_memories, query, memories, engine)
+    return JSONResponse({"memories": reranked, "engine": engine}, headers=add_cors_headers(request))
 
 
 def _semantic_available() -> bool:
@@ -3694,7 +3755,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.35",
+        "version":            "1.2.36",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -3720,7 +3781,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.35", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.36", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():

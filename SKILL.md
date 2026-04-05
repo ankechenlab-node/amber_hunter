@@ -369,7 +369,7 @@ This means you haven't generated an API key yet. Click the orange "生成 API Ke
 
 ## Version History
 
-- **v1.2.35** (2026-04-06): Trainer 增强 v1.2.35 — 4 项增强：① WAL + agent session logs 扩充训练数据（`_load_wal_texts`/`_load_agent_session_texts`）；② TagHead 分类头支持 auto-tagging（`GET /admin/train/tags`）；③ GPT-2 预训练权重初始化（`load_pretrained_gpt2`）；④ 增量训练从 checkpoint 继续（`incremental=True`）；`POST /admin/train` 新增 `use_gpt2_pretrain`/`incremental` 参数；tag vocab 保存至 `~/.amber-hunter/models/tag_vocab.json`。
+- **v1.2.36** (2026-04-06): Rerank Cold-Start — amber_hunter.py 新增 `_rerank_memories_model` / `_rerank_memories` dispatcher；recall 和 `/rerank` 支持 `rerank_engine=auto|model|llm|none`；cold-start 用户自动降级：模型不可用 → LLM → 原顺序；`rerank` bool 参数保留兼容（映射为 `rerank_engine=llm`）；`_rerank_source` 标注每个结果的来源。
 - **v1.2.34** (2026-04-05): Local GPT Fine-tune — `core/trainer.py` 实现 AmberGPT（N_HEAD=1, BLOCK_SIZE=96, N_EMBED=256, N_LAYER=6）在你记忆数据上微调；`POST /admin/train` 后台启动训练；`GET /admin/train/status` 检查状态；`GET /admin/train/score` 对 query-memory 对评分；模型保存至 `~/.amber-hunter/models/amber-gpt.pt`；Push Notifications — `POST /notify` 端点调用 huper.org 推送浏览器通知；修复 P2-2 WAL dead code（移除无效 wal_signals 预加载）；queue edit 预生成 cap_id 关联校正记录；`/-review` 支持 `?format=text|json`。
 - **v1.2.33** (2026-04-05): Incremental Sync + MCP Server — `get_unsynced_capsules(since=last_sync_at)` 增量同步；`POST /mcp` MCP 协议处理器暴露 7 个工具（recall_memories/create_memory/list_memories/get_memory/update_memory/delete_memory/get_stats）；`GET /stats` 返回胶囊统计/热力分布/WAL 状态/向量统计；`GET /admin/export` 备份导出；`POST /sync/resolve/{id}` 冲突解决。
 - **v1.2.32** (2026-04-05): `POST /admin/reindex-vectors` 重建 LanceDB 向量索引；修复 `list_tables()` Pydantic 对象访问（`.tables` 属性）；`local_files_only=True` 避免 HuggingFace 下载超时。
