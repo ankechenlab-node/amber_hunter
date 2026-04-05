@@ -715,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.31")
+app = FastAPI(title="Amber Hunter", version="1.2.32")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -3303,7 +3303,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.31",
+        "version":            "1.2.32",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
