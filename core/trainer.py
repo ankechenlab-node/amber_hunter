@@ -1,5 +1,5 @@
 """
-core/trainer.py — Local GPT Fine-Tuning for amber-hunter v1.2.35
+core/trainer.py — Local GPT Fine-Tuning for amber-hunter v1.2.37
 
 用 auto-research 优化的超参（N_HEAD=1, BLOCK_SIZE=96, N_EMBED=256）
 在用户记忆数据上微调，为 recall 重排 / 自动标签 / 记忆抽取提供本地推理。
@@ -477,10 +477,62 @@ def _load_agent_session_texts() -> list[str]:
     return texts
 
 
+def _is_noise_tag(tag: str) -> bool:
+    """判断是否为噪声 tag"""
+    import re
+    # 太短
+    if len(tag) < 2:
+        return True
+    # 系统生成标签
+    if re.match(r"^(related|auto-|signal:|ref:|link:)", tag):
+        return True
+    # 日期字符串
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", tag):
+        return True
+    # 哈希值
+    if re.match(r"^[a-f0-9]{8,}$", tag):
+        return True
+    # 常见水果/无关名词（需要过滤的噪声）
+    NOISE_TAGS = {"loquat", "apple", "banana", "orange", "grape"}
+    if tag in NOISE_TAGS:
+        return True
+    return False
+
+
+# 中文 ↔ 英文 同义 tag 合并映射
+_TAG_CANONICAL: dict[str, str] = {
+    "preference": "preference",
+    "偏好": "preference",
+    "decision": "decision",
+    "决策": "decision",
+    "fact": "personal_fact",
+    "personal_fact": "personal_fact",
+    "项目": "project",
+    "project": "project",
+    "技术": "tech",
+    "tech": "tech",
+    "error_fix": "error_fix",
+    "bug": "error_fix",
+    "创意": "creative",
+    "creative": "creative",
+    "学习": "learning",
+    "learning": "learning",
+}
+
+
+def _canonical_tag(tag: str) -> str:
+    """将 tag 规范化为标准形式"""
+    t = tag.strip().lower()
+    if t in _TAG_CANONICAL:
+        return _TAG_CANONICAL[t]
+    return t
+
+
 def _build_tag_vocab() -> tuple[dict[str, int], list[dict]]:
     """
     从胶囊 tags 构建标签词汇表和分类训练样本。
     返回 (tag_to_idx, training_samples)
+    包含降噪：过滤系统标签、日期、哈希值、常见噪声词，合并中英同义 tag。
     """
     import sqlite3
     from collections import Counter
@@ -497,15 +549,22 @@ def _build_tag_vocab() -> tuple[dict[str, int], list[dict]]:
         for memo, tags in rows:
             if not tags or not memo:
                 continue
-            tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
-            tag_freq.update(tag_list)
+            raw_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
+            # 降噪 + 规范化
+            tag_list = []
+            for t in raw_tags:
+                if _is_noise_tag(t):
+                    continue
+                canon = _canonical_tag(t)
+                tag_list.append(canon)
+                tag_freq[canon] += 1
             if tag_list:
                 samples.append({"text": memo, "tags": tag_list})
         conn.close()
     except Exception as e:
         print(f"[trainer] Failed to build tag vocab: {e}")
 
-    # 取最高频的 TAG_VOCAB_SIZE 个标签
+    # 取最高频的 TAG_VOCAB_SIZE 个标签（按规范化后的频率）
     common_tags = [t for t, _ in tag_freq.most_common(TAG_VOCAB_SIZE)]
     tag_to_idx = {t: i for i, t in enumerate(common_tags)}
 
@@ -514,7 +573,7 @@ def _build_tag_vocab() -> tuple[dict[str, int], list[dict]]:
     with open(TAG_VOCAB_PATH, "w", encoding="utf-8") as f:
         json.dump({"tag_to_idx": tag_to_idx, "idx_to_tag": {i: t for t, i in tag_to_idx.items()}}, f)
 
-    print(f"[trainer] Tag vocab: {len(tag_to_idx)} tags, {len(samples)} labeled samples")
+    print(f"[trainer] Tag vocab: {len(tag_to_idx)} tags (denoised), {len(samples)} labeled samples")
     return tag_to_idx, samples
 
 

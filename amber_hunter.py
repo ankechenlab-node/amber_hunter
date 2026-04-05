@@ -715,7 +715,7 @@ HOME = Path.home()
 ensure_config_dir()
 
 # ── FastAPI App ────────────────────────────────────────
-app = FastAPI(title="Amber Hunter", version="1.2.36")
+app = FastAPI(title="Amber Hunter", version="1.2.37")
 
 # CORS：仅允许 huper.org（生产）和 localhost（开发）
 # 使用 Starlette CORS middleware（更稳定）
@@ -3755,7 +3755,7 @@ def get_status(request: Request):
 
     return JSONResponse({
         "running":            True,
-        "version":            "1.2.36",
+        "version":            "1.2.37",
         "platform":           get_os(),
         "headless":           is_headless(),
         "session_key":        session_key,
@@ -3781,7 +3781,7 @@ def get_status(request: Request):
 @app.get("/")
 def root(request: Request):
     h = add_cors_headers(request)
-    return JSONResponse({"service": "amber-hunter", "version": "1.2.36", "docs": "/docs"}, headers=h)
+    return JSONResponse({"service": "amber-hunter", "version": "1.2.37", "docs": "/docs"}, headers=h)
 
 # ── 启动 ───────────────────────────────────────────────
 def main():
@@ -3802,6 +3802,77 @@ def main():
             _spawn_sync_if_enabled()
     t = threading.Thread(target=_periodic_sync_loop, daemon=True, name="amber-periodic-sync")
     t.start()
+
+    # ── 自动训练触发器 ───────────────────────────────────
+    _auto_train_last_count = count_capsules()
+    set_config("auto_train_last_count", str(_auto_train_last_count))
+
+    def _auto_train_if_needed():
+        """检查是否需要触发训练：每新增 N 个胶囊触发一次增量训练"""
+        try:
+            from core.trainer import is_trained
+            threshold = int(get_config("auto_train_threshold") or "100")
+            interval_hours = int(get_config("auto_train_interval_hours") or "6")
+            last_count_str = get_config("auto_train_last_count") or "0"
+            last_count = int(last_count_str)
+            current_count = count_capsules()
+            new_capsules = current_count - last_count
+
+            if new_capsules >= threshold:
+                # 达到阈值，触发训练
+                set_config("auto_train_last_count", str(current_count))
+                _spawn_train_if_enabled()
+            elif not is_trained() and current_count >= 50:
+                # cold-start：50 个胶囊且无模型时触发首次训练
+                set_config("auto_train_last_count", str(current_count))
+                _spawn_train_if_enabled()
+        except Exception:
+            pass
+
+    def _spawn_train_if_enabled():
+        """后台启动增量训练（已在 daemon 线程中）"""
+        try:
+            from core.trainer import is_trained, fine_tune, AmberTrainer, get_trainer
+            if not is_trained():
+                return  # 无模型时不自动训练，等用户手动触发
+            print("[auto-train] Triggering incremental training...")
+            result = fine_tune(iterations=100, use_gpt2_pretrain=True, incremental=True)
+            print(f"[auto-train] Done: {result.get('status')}")
+            AmberTrainer._instance = None  # 重置单例
+            get_trainer()
+        except Exception as e:
+            print(f"[auto-train] Failed: {e}")
+
+    def _periodic_train_loop():
+        """定时训练守护线程（默认每 6 小时一次）"""
+        while True:
+            interval_hours = int(get_config("auto_train_interval_hours") or "6")
+            time.sleep(interval_hours * 3600)
+            try:
+                from core.trainer import is_trained
+                if is_trained():
+                    print("[auto-train] Periodic incremental training triggered.")
+                    _spawn_train_if_enabled()
+            except Exception:
+                pass
+
+    # 启动定时训练线程
+    t2 = threading.Thread(target=_periodic_train_loop, daemon=True, name="amber-periodic-train")
+    t2.start()
+
+    # 启动时若未训练且胶囊数>=50，触发首次训练
+    try:
+        from core.trainer import is_trained
+        if not is_trained() and count_capsules() >= 50:
+            print(f"[auto-train] Cold-start: {count_capsules()} capsules, scheduling first training...")
+            def _cold_start_train():
+                time.sleep(10)  # 等待服务完全启动
+                _spawn_train_if_enabled()
+            t3 = threading.Thread(target=_cold_start_train, daemon=True, name="amber-cold-start-train")
+            t3.start()
+    except Exception:
+        pass
+
     # 后台预加载语义模型
     _preload_embed_model()
 
