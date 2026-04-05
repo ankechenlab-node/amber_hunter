@@ -2975,6 +2975,82 @@ def reindex_vectors(request: Request, authorization: str = Header(None)):
     }, headers=add_cors_headers(request))
 
 
+# ── 本地 GPT Fine-tune（需认证）──────────────────────────────
+class TrainIn(BaseModel):
+    vocab_size: int = 2500
+    iterations: int = 300
+    lr: float = 1e-3
+    batch_size: int = 32
+
+
+@app.post("/admin/train")
+def admin_train(request: Request, body: TrainIn, authorization: str = Header(None)):
+    """
+    在用户记忆数据上 fine-tune AmberGPT。
+    使用 auto-research 优化超参（N_HEAD=1, BLOCK_SIZE=96, N_EMBED=256, N_LAYER=6）。
+
+    curl -X POST http://localhost:18998/admin/train \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"vocab_size":2500,"iterations":300}'
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    h = add_cors_headers(request)
+
+    import threading
+
+    def run_train():
+        from core.trainer import fine_tune, get_trainer, AmberTrainer
+        result = fine_tune(
+            vocab_size=body.vocab_size,
+            iterations=body.iterations,
+            lr=body.lr,
+            batch_size=body.batch_size,
+        )
+        # 重置 trainer 单例以加载新模型
+        AmberTrainer._instance = None
+        get_trainer()
+
+    thread = threading.Thread(target=run_train, daemon=True)
+    thread.start()
+    return JSONResponse({
+        "started": True,
+        "message": f"Training started in background (vocab_size={body.vocab_size}, iterations={body.iterations})",
+        "check_status": "GET /admin/train/status",
+    }, headers=h)
+
+
+@app.get("/admin/train/status")
+def train_status(request: Request, authorization: str = Header(None)):
+    """检查本地模型训练状态"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    from core.trainer import is_trained, AmberTrainer, get_trainer
+    at = get_trainer()
+    return JSONResponse({
+        "is_trained": is_trained(),
+        "model_ready": at.is_ready(),
+    }, headers=add_cors_headers(request))
+
+
+@app.get("/admin/train/score")
+def train_score(request: Request, authorization: str = Header(None)):
+    """对 query 和 memory 文本评分（需先训练）"""
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    query = request.query_params.get("q", "")
+    memory = request.query_params.get("memory", "")
+    if not query or not memory:
+        return JSONResponse({"error": "q and memory params required"}, status_code=400)
+    from core.trainer import get_trainer
+    at = get_trainer()
+    if not at.is_ready():
+        return JSONResponse({"error": "model not trained yet", "trained": False}, status_code=400)
+    score = at.score(query, memory)
+    return JSONResponse({"score": round(score, 4), "trained": True}, headers=add_cors_headers(request))
+
+
 # ── 统计面板（需认证）────────────────────────────────────
 @app.get("/stats")
 def get_stats(request: Request, authorization: str = Header(None)):

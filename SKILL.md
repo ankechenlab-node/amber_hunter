@@ -369,7 +369,7 @@ This means you haven't generated an API key yet. Click the orange "生成 API Ke
 
 ## Version History
 
-- **v1.2.34** (2026-04-05): Push Notifications — `POST /notify` 端点调用 huper.org 推送浏览器通知；修复 P2-2 WAL dead code（移除无效 wal_signals 预加载）；queue edit 预生成 cap_id 关联校正记录；`/-review` 支持 `?format=text|json`。
+- **v1.2.34** (2026-04-05): Local GPT Fine-tune — `core/trainer.py` 实现 AmberGPT（N_HEAD=1, BLOCK_SIZE=96, N_EMBED=256, N_LAYER=6）在你记忆数据上微调；`POST /admin/train` 后台启动训练；`GET /admin/train/status` 检查状态；`GET /admin/train/score` 对 query-memory 对评分；模型保存至 `~/.amber-hunter/models/amber-gpt.pt`；Push Notifications — `POST /notify` 端点调用 huper.org 推送浏览器通知；修复 P2-2 WAL dead code（移除无效 wal_signals 预加载）；queue edit 预生成 cap_id 关联校正记录；`/-review` 支持 `?format=text|json`。
 - **v1.2.33** (2026-04-05): Incremental Sync + MCP Server — `get_unsynced_capsules(since=last_sync_at)` 增量同步；`POST /mcp` MCP 协议处理器暴露 7 个工具（recall_memories/create_memory/list_memories/get_memory/update_memory/delete_memory/get_stats）；`GET /stats` 返回胶囊统计/热力分布/WAL 状态/向量统计；`GET /admin/export` 备份导出；`POST /sync/resolve/{id}` 冲突解决。
 - **v1.2.32** (2026-04-05): `POST /admin/reindex-vectors` 重建 LanceDB 向量索引；修复 `list_tables()` Pydantic 对象访问（`.tables` 属性）；`local_files_only=True` 避免 HuggingFace 下载超时。
 - **v1.2.31** (2026-04-04): Multi-Embedding Provider — `core/embedding.py` 支持 MiniLM / Voyage / OpenAI / Ollama；`core/vector.py` 使用统一 `get_embed()` 接口；recall cooldown 逻辑（30分钟内召回过的胶囊压制分数至 0）。
