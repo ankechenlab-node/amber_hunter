@@ -310,19 +310,28 @@ def mark_synced(capsule_id: str):
     conn.close()
 
 
-def get_unsynced_capsules(limit: int = 0) -> list[dict]:
+def get_unsynced_capsules(limit: int = 0, since: float = 0.0) -> list[dict]:
+    """
+    获取未同步或自 since 以来修改过的胶囊（支持增量 sync）。
+    - 未同步胶囊：synced=0
+    - 增量同步：updated_at > since（即使已标记 synced）
+    """
     conn = sqlite3.connect(str(DB_PATH))
     c = conn.cursor()
-    sql = ("SELECT id,memo,content,tags,session_id,window_title,url,created_at,"
-           "salt,nonce,encrypted_len,content_hash,synced,source_type,category,category_path,updated_at,key_source,vector_id "
-           "FROM capsules WHERE synced=0 ORDER BY created_at ASC")
-    if limit > 0:
-        sql += f" LIMIT {limit}"
-    rows = c.execute(sql).fetchall()
-    conn.close()
     keys = ["id","memo","content","tags","session_id","window_title","url",
             "created_at","salt","nonce","encrypted_len","content_hash","synced",
             "source_type","category","category_path","updated_at","key_source","vector_id"]
+    if since > 0:
+        sql = (f"SELECT {','.join(keys)} FROM capsules "
+               f"WHERE synced=0 OR updated_at > ? ORDER BY updated_at ASC")
+        rows = c.execute(sql, (since,)).fetchall()
+    else:
+        sql = (f"SELECT {','.join(keys)} FROM capsules "
+               f"WHERE synced=0 ORDER BY created_at ASC")
+        if limit > 0:
+            sql += f" LIMIT {limit}"
+        rows = c.execute(sql).fetchall()
+    conn.close()
     return [dict(zip(keys, r)) for r in rows]
 
 

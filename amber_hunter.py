@@ -969,6 +969,50 @@ def list_capsules_handler(
         ]
     }, headers=h)
 
+def _auto_tag_local(content: str, existing_tags: str) -> str:
+    """
+    基于内容关键词规则自动打标签（轻量，无 LLM 调用开销）。
+    已有的标签不会被覆盖，只在检测到明确信号时追加。
+    """
+    import re
+    text = (content or "").lower()
+
+    # 检测信号 → 标签映射
+    TAG_RULES = [
+        # 技术栈
+        (["python", "pytorch", "torch"], "python"),
+        (["javascript", "js", "node", "npm", "react", "vue"], "javascript"),
+        (["rust", "cargo", "wasm"], "rust"),
+        (["golang", " go "], "golang"),
+        (["docker", "kubernetes", "k8s", "container"], "devops"),
+        (["git", "github", "commit", "branch"], "git"),
+        (["api", "rest", "graphql", "endpoint", "http"], "api"),
+        (["database", "sql", "postgres", "mysql", "sqlite", "mongodb"], "database"),
+        (["linux", "unix", "shell", "bash", "zsh"], "linux"),
+        (["aws", "gcp", "azure", "cloud"], "cloud"),
+        (["machine learning", "ml", "ai", "neural", "model training"], "ml-ai"),
+        (["bug", "error", "crash", "exception", "fix"], "debug"),
+        (["design", "ui", "ux", "figma", "css", "html"], "design"),
+        (["business", "startup", "product", "revenue", "用户"], "business"),
+        (["learn", "course", "tutorial", "读书", "学习"], "learning"),
+        (["meeting", "decision", "decided", "agreed"], "decision"),
+        (["preference", "prefer", "like", "倾向"], "preference"),
+        (["proactive", "capture", "amber", "memory"], "huper"),
+    ]
+
+    new_tags = set()
+    for keywords, tag in TAG_RULES:
+        for kw in keywords:
+            if kw in text:
+                new_tags.add(tag)
+                break
+
+    # 合并已有标签
+    existing = set(t.strip() for t in (existing_tags or "").split(",") if t.strip())
+    merged = existing | new_tags
+    return ",".join(sorted(merged))
+
+
 @app.post("/capsules")
 def create_capsule(capsule: CapsuleIn, authorization: str = Header(None), request: Request = None):
     verify_token(authorization)
@@ -2321,7 +2365,9 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
             status_code=400, headers=add_cors_headers(request)
         )
 
-    unsynced = get_unsynced_capsules()
+    # P2-3: 增量 sync — 使用 last_sync_at 时间戳
+    last_sync_ts = float(get_config("last_sync_at") or "0")
+    unsynced = get_unsynced_capsules(since=last_sync_ts)
     if not unsynced:
         return JSONResponse({"synced": 0, "total": 0, "message": "没有需要同步的胶囊"},
                             headers=add_cors_headers(request))
@@ -2340,6 +2386,11 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
 
     logging.info(f"[amber-hunter] /sync: {total_synced}/{len(unsynced)}")
     h = add_cors_headers(request)
+
+    # P2-3: 增量 sync — 成功后更新 last_sync_at
+    if total_synced > 0:
+        set_config("last_sync_at", str(time.time()))
+
     return JSONResponse({
         "synced": total_synced,
         "total":  len(unsynced),
@@ -2347,6 +2398,7 @@ def sync_to_cloud(request: Request, authorization: str = Header(None)):
         "errors": all_errors[:10] if all_errors else None,
         "partial": total_synced > 0 and total_synced < len(unsynced),
         "all_synced": total_synced == len(unsynced),
+        "incremental": last_sync_ts > 0,
     }, headers=h)
 
 
@@ -2516,6 +2568,48 @@ def sync_pull(request: Request, authorization: str = Header(None)):
     result = _pull_from_cloud(api_token, huper_url, master_pw)
     logging.info(f"[amber-hunter] /sync/pull: {result}")
     return JSONResponse(result, headers=add_cors_headers(request))
+
+
+@app.post("/sync/resolve/{capsule_id}")
+def resolve_conflict(capsule_id: str, request: Request, resolution: str = "local",
+                    authorization: str = Header(None)):
+    """
+    手动解决同步冲突。
+    resolution: 'local' = 保留本地版本，'cloud' = 保留云端版本
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+    if resolution not in ("local", "cloud"):
+        return JSONResponse({"error": "resolution must be local or cloud"}, status_code=400)
+
+    if resolution == "cloud":
+        # 从云端重新拉取该胶囊
+        api_token = get_api_token()
+        huper_url = get_huper_url() or "https://huper.org/api"
+        master_pw = get_master_password()
+        try:
+            import httpx
+            with httpx.Client(timeout=10.0, trust_env=False) as client:
+                resp = client.get(
+                    f"{huper_url}/capsules/{capsule_id}",
+                    headers={"Authorization": f"Bearer {api_token}"}
+                )
+                if resp.status_code == 200:
+                    cloud_cap = resp.json()
+                    _import_cloud_capsule(cloud_cap, master_pw)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    else:
+        # 保留本地：标记本地为已同步（强制上传）
+        from core.db import _get_conn
+        conn = _get_conn()
+        c = conn.cursor()
+        now = time.time()
+        c.execute("UPDATE capsules SET synced=1, updated_at=? WHERE id=?", (now, capsule_id))
+        conn.commit()
+        conn.close()
+
+    return JSONResponse({"id": capsule_id, "resolution": resolution})
 
 
 class NotifyIn(BaseModel):
@@ -2836,6 +2930,149 @@ def reindex_vectors(request: Request, authorization: str = Header(None)):
         "vector_count": stats.get("count", 0),
         "elapsed_seconds": round(elapsed, 1),
     }, headers=add_cors_headers(request))
+
+
+# ── 统计面板（需认证）────────────────────────────────────
+@app.get("/stats")
+def get_stats(request: Request, authorization: str = Header(None)):
+    """
+    返回记忆统计：总数、分类分布、热度分布、同步状态。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    conn = _get_conn()
+    c = conn.cursor()
+
+    # 总数
+    total = c.execute("SELECT COUNT(*) FROM capsules").fetchone()[0]
+    total_content = c.execute("SELECT COUNT(*) FROM capsules WHERE content IS NOT NULL AND content != ''").fetchone()[0]
+
+    # 分类分布
+    cat_rows = c.execute(
+        "SELECT category_path, COUNT(*) as cnt FROM capsules GROUP BY category_path ORDER BY cnt DESC LIMIT 20"
+    ).fetchall()
+    category_dist = [{"path": r[0] or "general/default", "count": r[1]} for r in cat_rows]
+
+    # 热度分布
+    hot_buckets = {
+        "high (>5 hits)": c.execute("SELECT COUNT(*) FROM capsules WHERE hotness_score > 5").fetchone()[0],
+        "medium (1-5 hits)": c.execute("SELECT COUNT(*) FROM capsules WHERE hotness_score BETWEEN 1 AND 5").fetchone()[0],
+        "low (0 hits)": c.execute("SELECT COUNT(*) FROM capsules WHERE hotness_score < 1").fetchone()[0],
+    }
+
+    # 同步状态
+    synced = c.execute("SELECT COUNT(*) FROM capsules WHERE synced = 1").fetchone()[0]
+    unsynced = total - synced
+
+    # 待审阅队列
+    pending = c.execute("SELECT COUNT(*) FROM memory_queue WHERE status = 'pending'").fetchone()[0]
+
+    # 向量索引
+    from core.vector import get_vector_stats
+    vstats = get_vector_stats()
+
+    # WAL 统计
+    from core.wal import get_wal_stats
+    wal = get_wal_stats()
+
+    # Insight 数量
+    insights = c.execute("SELECT COUNT(*) FROM insights").fetchone()[0]
+
+    # 最近7天新增
+    import time
+    week_ago = time.time() - 7 * 86400
+    week_new = c.execute("SELECT COUNT(*) FROM capsules WHERE created_at > ?", (week_ago,)).fetchone()[0]
+
+    return JSONResponse({
+        "capsules": {
+            "total": total,
+            "with_content": total_content,
+            "synced": synced,
+            "unsynced": unsynced,
+            "last_week": week_new,
+        },
+        "categories": category_dist,
+        "hotness": hot_buckets,
+        "queue": {"pending": pending},
+        "vectors": vstats,
+        "insights": insights,
+        "wal": wal,
+    }, headers=add_cors_headers(request))
+
+
+# ── 备份导出（需认证）────────────────────────────────────
+@app.get("/admin/export")
+def export_backup(request: Request, authorization: str = Header(None)):
+    """
+    导出所有胶囊为加密 JSON 文件（AES-256-GCM）。
+    ?include_content=1 包含加密 content（默认只导出 memo）
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    include_content = request.query_params.get("include_content", "0") == "1"
+
+    conn = _get_conn()
+    c = conn.cursor()
+    cols = "id,memo,tags,session_id,window_title,url,created_at,synced,source_type,category,category_path,updated_at"
+    if include_content:
+        cols += ",content,salt,nonce,encrypted_len,content_hash,key_source"
+    rows = c.execute(f"SELECT {cols} FROM capsules ORDER BY created_at DESC").fetchall()
+    conn.close()
+
+    keys = cols.split(",")
+    capsules = [dict(zip(keys, r)) for r in rows]
+
+    # 添加向量统计
+    from core.vector import get_vector_stats
+    vstats = get_vector_stats()
+
+    export_data = {
+        "version": "1.0",
+        "exported_at": time.time(),
+        "capsule_count": len(capsules),
+        "vector_stats": vstats,
+        "capsules": capsules,
+    }
+
+    # 序列化为 JSON（不加密，因为内容字段已是加密的）
+    import json
+    json_bytes = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+
+    # 返回文件下载
+    from fastapi.responses import Response
+    import base64
+    b64 = base64.b64encode(json_bytes).decode()
+    return JSONResponse({
+        "filename": f"amber-backup-{int(time.time())}.json",
+        "size_bytes": len(json_bytes),
+        "capsule_count": len(capsules),
+        "data": b64,
+        "note": "内容字段已是 AES-256-GCM 加密格式，需密钥解密",
+    }, headers=add_cors_headers(request))
+
+
+# ── MCP Server 端点（需认证）────────────────────────────────
+@app.post("/mcp")
+async def mcp_handler(request: Request, authorization: str = Header(None)):
+    """
+    MCP (Model Context Protocol) 接口。
+    支持 tools/list、tools/call、resources/list、resources/read。
+    用于让 Claude Code 或其他 MCP Client 访问 amber-hunter 记忆工具。
+    """
+    raw_token = _extract_bearer_token(request, authorization)
+    verify_token(raw_token)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": {"code": -32700, "message": "Invalid JSON"}}, status_code=400)
+
+    from core.mcp import MCPServer
+    server = MCPServer(token=raw_token)
+    result = server.handle_request(body)
+    return JSONResponse(result, headers=add_cors_headers(request))
 
 
 # ── Insight 缓存生成（需认证）───────────────────────────────
